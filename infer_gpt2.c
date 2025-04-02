@@ -51,7 +51,7 @@ void encoder_forward(float* out,
     }
 }
 
-void layernorm_forward(float* out, float* mean, float* rstd,
+void layernorm_forward(float* out,
                        float* inp, float* weight, float* bias,
                        int B, int T, int C) {
     // reference: https://pytorch.org/docs/stable/generated/torch.nn.LayerNorm.html
@@ -86,9 +86,6 @@ void layernorm_forward(float* out, float* mean, float* rstd,
                 float o = n * weight[i] + bias[i]; // scale and shift
                 out_bt[i] = o; // write
             }
-            // cache the mean and rstd for the backward pass later
-            mean[b * T + t] = m;
-            rstd[b * T + t] = s;
         }
     }
 }
@@ -125,13 +122,12 @@ void attention_forward(float* out, float* preatt, float* att,
     // (and of course, no layer mixes information across batch)
     int C3 = C*3;
     int hs = C / NH; // head size
-    float scale = 1.0 / sqrtf(hs);
+    float scale = 1.0f / sqrtf(hs);
 
     for (int b = 0; b < B; b++) {
         for (int t = 0; t < T; t++) {
             for (int h = 0; h < NH; h++) {
                 float* query_t = inp + b * T * C3 + t * C3 + h * hs;
-                float* preatt_bth = preatt + b*NH*T*T + h*T*T + t*T;
                 float* att_bth = att + b*NH*T*T + h*T*T + t*T;
 
                 // pass 1: calculate query dot key and maxval
@@ -145,21 +141,18 @@ void attention_forward(float* out, float* preatt, float* att,
                         val += query_t[i] * key_t2[i];
                     }
                     val *= scale;
-                    if (val > maxval) {
-                        maxval = val;
-                    }
-
-                    preatt_bth[t2] = val;
+                    if (val > maxval) maxval = val;
+                    att_bth[t2] = val;
                 }
 
                 // pass 2: calculate the exp and keep track of sum
                 float expsum = 0.0f;
                 for (int t2 = 0; t2 <= t; t2++) {
-                    float expv = expf(preatt_bth[t2] - maxval);
+                    float expv = expf(att_bth[t2] - maxval);
                     expsum += expv;
                     att_bth[t2] = expv;
                 }
-                float expsum_inv = expsum == 0.0f ? 0.0f : 1.0f / expsum;
+                float expsum_inv = 1.0f / expsum;
 
                 // pass 3: normalize to get the softmax
                 for (int t2 = 0; t2 < T; t2++) {
@@ -187,7 +180,7 @@ void attention_forward(float* out, float* preatt, float* att,
     }
 }
 
-#define GELU_SCALING_FACTOR sqrtf(2.0f / M_PI)
+#define GELU_SCALING_FACTOR 0.7978845608028654f // sqrt(2/pi) precomputed
 void gelu_forward(float* out, float* inp, int N) {
     // (approximate) GeLU elementwise non-linearity in the MLP block of Transformer
     for (int i = 0; i < N; i++) {
@@ -226,9 +219,9 @@ void softmax_forward(float* probs, float* logits, int B, int T, int V, int Vp) {
                 probs_bt[i] = expf(logits_bt[i] - maxval);
                 sum += probs_bt[i];
             }
-            // note we only loop to V, leaving the padded dimensions
+            float sum_inv = 1.0f / sum;
             for (int i = 0; i < V; i++) {
-                probs_bt[i] /= sum;
+                probs_bt[i] *= sum_inv;
             }
             // for extra super safety we may wish to include this too,
             // forcing the probabilities here to be zero, but it shouldn't matter
@@ -558,8 +551,6 @@ void gpt2_forward(GPT2 *model, int* inputs, int* targets, size_t B, size_t T) {
 
         // get the pointers of the activations for this layer
         float* l_ln1 = acts.ln1 + l * B * T * C;
-        float* l_ln1_mean = acts.ln1_mean + l * B * T;
-        float* l_ln1_rstd = acts.ln1_rstd + l * B * T;
         float* l_qkv = acts.qkv + l * B * T * 3*C;
         float* l_atty = acts.atty + l * B * T * C;
         float* l_preatt = acts.preatt + l * B * NH * T * T;
@@ -567,27 +558,25 @@ void gpt2_forward(GPT2 *model, int* inputs, int* targets, size_t B, size_t T) {
         float* l_attproj = acts.attproj + l * B * T * C;
         float* l_residual2 = acts.residual2 + l * B * T * C;
         float* l_ln2 = acts.ln2 + l * B * T * C;
-        float* l_ln2_mean = acts.ln2_mean + l * B * T;
-        float* l_ln2_rstd = acts.ln2_rstd + l * B * T;
         float* l_fch = acts.fch + l * B * T * 4*C;
         float* l_fch_gelu = acts.fch_gelu + l * B * T * 4*C;
         float* l_fcproj = acts.fcproj + l * B * T * C;
         float* l_residual3 = acts.residual3 + l * B * T * C;
 
         // now do the forward pass
-        layernorm_forward(l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, B, T, C);
+        layernorm_forward(l_ln1, residual, l_ln1w, l_ln1b, B, T, C);
         matmul_forward(l_qkv, l_ln1, l_qkvw, l_qkvb, B, T, C, 3*C);
         attention_forward(l_atty, l_preatt, l_att, l_qkv, B, T, C, NH);
         matmul_forward(l_attproj, l_atty, l_attprojw, l_attprojb, B, T, C, C);
         residual_forward(l_residual2, residual, l_attproj, B*T*C);
-        layernorm_forward(l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, B, T, C);
+        layernorm_forward(l_ln2, l_residual2, l_ln2w, l_ln2b, B, T, C);
         matmul_forward(l_fch, l_ln2, l_fcw, l_fcb, B, T, C, 4*C);
         gelu_forward(l_fch_gelu, l_fch, B*T*4*C);
         matmul_forward(l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, B, T, 4*C, C);
         residual_forward(l_residual3, l_residual2, l_fcproj, B*T*C);
     }
     residual = acts.residual3 + (L-1) * B * T * C; // last residual is in residual3
-    layernorm_forward(acts.lnf, acts.lnf_mean, acts.lnf_rstd, residual, params.lnfw, params.lnfb, B, T, C);
+    layernorm_forward(acts.lnf, residual, params.lnfw, params.lnfb, B, T, C);
     matmul_forward(acts.logits, acts.lnf, params.wte, NULL, B, T, C, Vp);
     softmax_forward(acts.probs, acts.logits, B, T, V, Vp);
 
