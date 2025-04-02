@@ -1,3 +1,6 @@
+Kernel module is under GPLv2 License.
+
+Original llm.c is under MIT License.
 MIT License
 
 Copyright (c) 2024 Andrej Karpathy

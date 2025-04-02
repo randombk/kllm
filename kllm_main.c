@@ -12,13 +12,16 @@
 #include <linux/mutex.h>
 #include <asm/fpu/api.h>
 #include "kllm_gpt2.h"
+#include <linux/workqueue.h>
+#include <linux/completion.h>
+#include <linux/kthread.h>
 
 #define DEVICE_NAME "llm0"
 #define CLASS_NAME "kllm"
 #define FW_MODEL "kllm-gpt2.bin"
 #define FW_TOKENIZER "kllm-tokenizer.bin"
 #define MAX_INPUT_SIZE 4096
-#define MAX_OUTPUT_SIZE 4096
+#define MAX_OUTPUT_SIZE 16
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("David Li (randombk)");
@@ -41,9 +44,68 @@ static struct gpt2_model gpt2;
 // Device buffers
 static char *input_buffer = NULL;
 static char *output_buffer = NULL;
+static size_t output_pos = 0;
+static size_t total_output_len = 0;
+static bool generation_complete = false;
 
 // Device mutex
 static struct mutex kllm_mutex;
+
+// Kernel thread for generation
+static struct task_struct *kllm_thread = NULL;
+static bool thread_running = false;
+
+// Generation thread function
+static int kllm_generation_thread(void *data)
+{
+    int ret;
+    char token_buffer[MAX_OUTPUT_SIZE];
+    size_t output_pos = 0;
+    
+    // Generate tokens one by one
+    while (output_pos < MAX_OUTPUT_SIZE - 1) {
+        // Generate next token
+        kernel_fpu_begin();
+        ret = gpt2_generate_next_token(&gpt2, input_buffer, token_buffer);
+        kernel_fpu_end();
+        
+        if (ret < 0) {
+            snprintf(output_buffer, MAX_OUTPUT_SIZE, "Error generating response: %d", ret);
+            total_output_len = strlen(output_buffer);
+            break;
+        }
+        
+        if (ret == 0) {
+            // End of generation
+            break;
+        }
+        
+        // Check if we have space for the new token
+        if (output_pos + ret >= MAX_OUTPUT_SIZE - 1) {
+            break;
+        }
+        
+        // Append token to output
+        strcpy(output_buffer + output_pos, token_buffer);
+        output_pos += ret;
+
+        // Print the output thus far
+        printk(KERN_INFO "KLLM: Generated response: %s\n", output_buffer);
+        
+        // Allow other tasks to run between tokens
+        cond_resched();
+    }
+    
+    // Ensure output is null terminated
+    output_buffer[output_pos] = '\0';
+    total_output_len = output_pos;
+    generation_complete = true;
+    
+    printk(KERN_INFO "KLLM: Generated response of %zu bytes\n", total_output_len);
+    
+    thread_running = false;
+    return 0;
+}
 
 // Device open function
 static int kllm_open(struct inode *inode, struct file *file)
@@ -59,27 +121,6 @@ static int kllm_release(struct inode *inode, struct file *file)
     return 0;
 }
 
-// Process input and generate response
-static void process_input(const char *input, char *output, size_t max_len)
-{
-    int ret;
-    size_t output_len = 0;
-
-    // Generate response using GPT-2
-    kernel_fpu_begin();
-    ret = gpt2_generate(&gpt2, input, output, max_len);
-    kernel_fpu_end();
-    if (ret < 0) {
-        snprintf(output, max_len, "Error generating response: %d", ret);
-        return;
-    }
-
-    output_len = strlen(output);
-    if (output_len >= max_len) {
-        output[max_len - 1] = '\0';
-    }
-}
-
 // Device write function
 static ssize_t kllm_write(struct file *file, const char __user *buffer,
                          size_t len, loff_t *offset)
@@ -92,7 +133,11 @@ static ssize_t kllm_write(struct file *file, const char __user *buffer,
         return -EBUSY;
     }
     
-    // Clear input buffer
+    // Reset state
+    output_pos = 0;
+    total_output_len = 0;
+    generation_complete = false;
+    memset(output_buffer, 0, MAX_OUTPUT_SIZE);
     memset(input_buffer, 0, MAX_INPUT_SIZE);
     
     // Copy from user space to kernel space
@@ -102,11 +147,20 @@ static ssize_t kllm_write(struct file *file, const char __user *buffer,
         return -EFAULT;
     }
     
-    // Process the input and generate a response
-    memset(output_buffer, 0, MAX_OUTPUT_SIZE);
-    process_input(input_buffer, output_buffer, MAX_OUTPUT_SIZE);
+    // Start generation thread if not already running
+    if (!thread_running) {
+        thread_running = true;
+        kllm_thread = kthread_run(kllm_generation_thread, NULL, "kllm_gen");
+        if (IS_ERR(kllm_thread)) {
+            thread_running = false;
+            mutex_unlock(&kllm_mutex);
+            printk(KERN_ERR "KLLM: Failed to start generation thread\n");
+            return -ENOMEM;
+        }
+    }
     
     printk(KERN_INFO "KLLM: Received %zu bytes from user\n", bytes_to_copy);
+    mutex_unlock(&kllm_mutex);
     return bytes_to_copy;
 }
 
@@ -114,17 +168,22 @@ static ssize_t kllm_write(struct file *file, const char __user *buffer,
 static ssize_t kllm_read(struct file *file, char __user *buffer,
                         size_t len, loff_t *offset)
 {
-    size_t response_len = strlen(output_buffer);
     size_t bytes_to_copy;
     
+    // Try to acquire the mutex
+    if (!mutex_trylock(&kllm_mutex)) {
+        printk(KERN_ERR "KLLM: Device is busy processing another request\n");
+        return -EBUSY;
+    }
+    
     // Check if we've already sent the entire response
-    if (*offset >= response_len) {
+    if (*offset >= total_output_len) {
         mutex_unlock(&kllm_mutex);
         return 0;
     }
     
     // Calculate how many bytes to copy
-    bytes_to_copy = min(len, response_len - *offset);
+    bytes_to_copy = min(len, total_output_len - *offset);
     
     // Copy from kernel space to user space
     if (copy_to_user(buffer, output_buffer + *offset, bytes_to_copy)) {
@@ -137,9 +196,7 @@ static ssize_t kllm_read(struct file *file, char __user *buffer,
     *offset += bytes_to_copy;
     
     // If we've sent the entire response, release the mutex
-    if (*offset >= response_len) {
-        mutex_unlock(&kllm_mutex);
-    }
+    mutex_unlock(&kllm_mutex);
     
     return bytes_to_copy;
 }
@@ -262,6 +319,13 @@ fail_alloc:
 // Module cleanup function
 static void __exit kllm_exit(void)
 {
+    // Stop generation thread if running
+    if (thread_running && kllm_thread) {
+        kthread_stop(kllm_thread);
+        kllm_thread = NULL;
+        thread_running = false;
+    }
+    
     // Free GPT-2 model
     gpt2_free(&gpt2);
     

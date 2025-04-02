@@ -102,6 +102,6 @@ void tokenizer_free(struct tokenizer *tokenizer);
 int gpt2_build_from_firmware(struct gpt2_model *model, const struct firmware *fw);
 void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t B, size_t T);
 void gpt2_free(struct gpt2_model *model);
-int gpt2_generate(struct gpt2_model *model, const char *prompt, char *output, size_t max_output_len);
+int gpt2_generate_next_token(struct gpt2_model *model, const char *prompt, char *output);
 
 #endif /* KLLM_GPT2_H */ 

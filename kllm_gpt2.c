@@ -664,15 +664,25 @@ void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t B,
         float *l_residual3 = acts.residual3 + l * B * T * C;
 
         layernorm_forward(l_ln1, residual, l_ln1w, l_ln1b, B, T, C);
+        // schedule();
         matmul_forward(l_qkv, l_ln1, l_qkvw, l_qkvb, B, T, C, 3*C);
+        // schedule();
         attention_forward(l_atty, l_preatt, l_att, l_qkv, B, T, C, NH);
+        // schedule();
         matmul_forward(l_attproj, l_atty, l_attprojw, l_attprojb, B, T, C, C);
+        // schedule();
         residual_forward(l_residual2, residual, l_attproj, B*T*C);
+        // schedule();
         layernorm_forward(l_ln2, l_residual2, l_ln2w, l_ln2b, B, T, C);
+        // schedule();
         matmul_forward(l_fch, l_ln2, l_fcw, l_fcb, B, T, C, 4*C);
+        // schedule();
         gelu_forward(l_fch_gelu, l_fch, B*T*4*C);
+        // schedule();
         matmul_forward(l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, B, T, 4*C, C);
+        // schedule();
         residual_forward(l_residual3, l_residual2, l_fcproj, B*T*C);
+        // schedule();
     }
 
     residual = acts.residual3 + (L-1) * B * T * C;
@@ -726,7 +736,7 @@ static int sample_mult(float *probabilities, int n, float coin) {
 }
 
 // High-level generation function
-int gpt2_generate(struct gpt2_model *model, const char *prompt, char *output, size_t max_output_len) {
+int gpt2_generate_next_token(struct gpt2_model *model, const char *prompt, char *output) {
     if (!model->params_memory) {
         pr_err("Model not initialized properly\n");
         return -EINVAL;
@@ -757,7 +767,6 @@ int gpt2_generate(struct gpt2_model *model, const char *prompt, char *output, si
     memset(gen_tokens, 0, B * T * sizeof(int));
     
     uint64_t rng_state = 1337; // fixed seed for reproducibility
-    const int max_tokens = 100; // maximum number of tokens to generate
 
     // Encode the prompt
     size_t num_prompt_tokens;
@@ -769,48 +778,37 @@ int gpt2_generate(struct gpt2_model *model, const char *prompt, char *output, si
         return -EINVAL;
     }
 
-    // Generate tokens one by one
-    size_t output_pos = 0;
-    for (int t = num_prompt_tokens; t < max_tokens && output_pos < max_output_len - 1; t++) {
-        // Run the model forward pass
-        gpt2_forward(model, gen_tokens, NULL, B, T);
-        
-        // Get the next token probabilities
-        float *probs = model->acts.probs + (t-1) * model->config.padded_vocab_size;
-        float coin;
-        random_f32(&rng_state, &coin);
-        int next_token = sample_mult(probs, model->config.vocab_size, coin);
-        
-        // Stop if we hit the end token
-        if (next_token == tokenizer.eot_token) {
-            break;
-        }
-        
-        // Store the generated token
-        gen_tokens[t] = next_token;
-        
-        // Decode and append the token to output
-        const char *token_str = tokenizer_decode(&tokenizer, next_token);
-        if (token_str) {
-            size_t token_len = strlen(token_str);
-            if (output_pos + token_len >= max_output_len - 1) {
-                break;
-            }
-            strcpy(output + output_pos, token_str);
-            
-            printk(KERN_INFO "KLLM: Token: %s\n", token_str);
-            output_pos += token_len;
-        }
+    // Run the model forward pass
+    gpt2_forward(model, gen_tokens, NULL, B, T);
+
+    // Get the next token probabilities
+    float *probs = model->acts.probs + (num_prompt_tokens-1) * model->config.padded_vocab_size;
+    float coin;
+    random_f32(&rng_state, &coin);
+    int next_token = sample_mult(probs, model->config.vocab_size, coin);
+    
+    // Stop if we hit the end token
+    if (next_token == tokenizer.eot_token) {
+        vfree(gen_tokens);
+        tokenizer_free(&tokenizer);
+        return 0; // End of generation
+    }
+    
+    // Decode the token to output
+    const char *token_str = tokenizer_decode(&tokenizer, next_token);
+    if (!token_str) {
+        vfree(gen_tokens);
+        tokenizer_free(&tokenizer);
+        return -EINVAL;
     }
 
-    // Ensure output is null terminated
-    output[output_pos] = '\0';
-
+    strcpy(output, token_str);
+    
     // Cleanup
     vfree(gen_tokens);
     tokenizer_free(&tokenizer);
 
-    return output_pos;
+    return strlen(token_str);
 }
 
 // Helper function to find the longest matching token at a given position
