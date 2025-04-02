@@ -15,6 +15,8 @@
 #include <linux/workqueue.h>
 #include <linux/completion.h>
 #include <linux/kthread.h>
+#include <linux/sched.h>
+#include <linux/cpumask.h>
 
 #define DEVICE_NAME "llm0"
 #define CLASS_NAME "kllm"
@@ -44,6 +46,7 @@ static struct gpt2_model gpt2;
 // Device buffers
 static char *input_buffer = NULL;
 static char *output_buffer = NULL;
+static char *context_buffer = NULL;  // Buffer to maintain generation context
 static size_t output_pos = 0;
 static size_t total_output_len = 0;
 static bool generation_complete = false;
@@ -62,16 +65,27 @@ static int kllm_generation_thread(void *data)
     char token_buffer[MAX_OUTPUT_SIZE];
     size_t output_pos = 0;
     
+    // Restrict thread to CPU 1
+    cpumask_t cpu_mask;
+    cpumask_clear(&cpu_mask);
+    cpumask_set_cpu(1, &cpu_mask);
+    set_cpus_allowed_ptr(current, &cpu_mask);
+    
+    // Initialize context with input
+    mutex_lock(&kllm_mutex);
+    strcpy(context_buffer, input_buffer);
+    mutex_unlock(&kllm_mutex);
+    
     // Generate tokens one by one
     while (output_pos < MAX_OUTPUT_SIZE - 1) {
         // Generate next token
-        kernel_fpu_begin();
-        ret = gpt2_generate_next_token(&gpt2, input_buffer, token_buffer);
-        kernel_fpu_end();
+        ret = gpt2_generate_next_token(&gpt2, context_buffer, token_buffer);
         
         if (ret < 0) {
+            mutex_lock(&kllm_mutex);
             snprintf(output_buffer, MAX_OUTPUT_SIZE, "Error generating response: %d", ret);
             total_output_len = strlen(output_buffer);
+            mutex_unlock(&kllm_mutex);
             break;
         }
         
@@ -85,9 +99,13 @@ static int kllm_generation_thread(void *data)
             break;
         }
         
-        // Append token to output
+        // Update output buffer and context with mutex protection
+        mutex_lock(&kllm_mutex);
         strcpy(output_buffer + output_pos, token_buffer);
+        strcat(context_buffer, token_buffer);  // Append new token to context
         output_pos += ret;
+        total_output_len = output_pos;
+        mutex_unlock(&kllm_mutex);
 
         // Print the output thus far
         printk(KERN_INFO "KLLM: Generated response: %s\n", output_buffer);
@@ -97,9 +115,11 @@ static int kllm_generation_thread(void *data)
     }
     
     // Ensure output is null terminated
+    mutex_lock(&kllm_mutex);
     output_buffer[output_pos] = '\0';
     total_output_len = output_pos;
     generation_complete = true;
+    mutex_unlock(&kllm_mutex);
     
     printk(KERN_INFO "KLLM: Generated response of %zu bytes\n", total_output_len);
     
@@ -139,6 +159,7 @@ static ssize_t kllm_write(struct file *file, const char __user *buffer,
     generation_complete = false;
     memset(output_buffer, 0, MAX_OUTPUT_SIZE);
     memset(input_buffer, 0, MAX_INPUT_SIZE);
+    memset(context_buffer, 0, MAX_INPUT_SIZE);
     
     // Copy from user space to kernel space
     if (copy_from_user(input_buffer, buffer, bytes_to_copy)) {
@@ -221,7 +242,8 @@ static int __init kllm_init(void)
     // Allocate device buffers
     input_buffer = kmalloc(MAX_INPUT_SIZE, GFP_KERNEL);
     output_buffer = kmalloc(MAX_OUTPUT_SIZE, GFP_KERNEL);
-    if (!input_buffer || !output_buffer) {
+    context_buffer = kmalloc(MAX_INPUT_SIZE, GFP_KERNEL);
+    if (!input_buffer || !output_buffer || !context_buffer) {
         printk(KERN_ERR "KLLM: Failed to allocate memory\n");
         ret = -ENOMEM;
         goto fail_alloc;
@@ -312,6 +334,7 @@ fail_class:
 fail_chrdev:
     kfree(input_buffer);
     kfree(output_buffer);
+    kfree(context_buffer);
 fail_alloc:
     return ret;
 }
@@ -344,6 +367,7 @@ static void __exit kllm_exit(void)
     // Free memory
     kfree(input_buffer);
     kfree(output_buffer);
+    kfree(context_buffer);
     
     // Destroy the mutex
     mutex_destroy(&kllm_mutex);

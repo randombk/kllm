@@ -5,6 +5,7 @@
 #include <linux/math.h>
 #include <linux/math64.h>
 #include <linux/vmalloc.h>
+#include <asm/fpu/api.h>
 #include "kllm_gpt2.h"
 
 /* 
@@ -631,6 +632,9 @@ void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t B,
     // Forward pass
     struct parameter_tensors params = model->params;
     struct activation_tensors acts = model->acts;
+
+    cond_resched();
+    kernel_fpu_begin();
     float *residual;
 
     encoder_forward(acts.encoded, inputs, params.wte, params.wpe, B, T, C);
@@ -663,26 +667,50 @@ void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t B,
         float *l_fcproj = acts.fcproj + l * B * T * C;
         float *l_residual3 = acts.residual3 + l * B * T * C;
 
+        kernel_fpu_end();
+        cond_resched();
+        kernel_fpu_begin();
+
         layernorm_forward(l_ln1, residual, l_ln1w, l_ln1b, B, T, C);
-        // schedule();
+        kernel_fpu_end();
+        cond_resched();
+        kernel_fpu_begin();
         matmul_forward(l_qkv, l_ln1, l_qkvw, l_qkvb, B, T, C, 3*C);
-        // schedule();
+        kernel_fpu_end();
+        cond_resched();
+        kernel_fpu_begin();
         attention_forward(l_atty, l_preatt, l_att, l_qkv, B, T, C, NH);
-        // schedule();
+        kernel_fpu_end();
+        cond_resched();
+        kernel_fpu_begin();
         matmul_forward(l_attproj, l_atty, l_attprojw, l_attprojb, B, T, C, C);
-        // schedule();
+        kernel_fpu_end();
+        cond_resched();
+        kernel_fpu_begin();
         residual_forward(l_residual2, residual, l_attproj, B*T*C);
-        // schedule();
+        kernel_fpu_end();
+        cond_resched();
+        kernel_fpu_begin();
         layernorm_forward(l_ln2, l_residual2, l_ln2w, l_ln2b, B, T, C);
-        // schedule();
+        kernel_fpu_end();
+        cond_resched();
+        kernel_fpu_begin();
         matmul_forward(l_fch, l_ln2, l_fcw, l_fcb, B, T, C, 4*C);
-        // schedule();
+        kernel_fpu_end();
+        cond_resched();
+        kernel_fpu_begin();
         gelu_forward(l_fch_gelu, l_fch, B*T*4*C);
-        // schedule();
+        kernel_fpu_end();
+        cond_resched();
+        kernel_fpu_begin();
         matmul_forward(l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, B, T, 4*C, C);
-        // schedule();
+        kernel_fpu_end();
+        cond_resched();
+        kernel_fpu_begin();
         residual_forward(l_residual3, l_residual2, l_fcproj, B*T*C);
-        // schedule();
+        kernel_fpu_end();
+        cond_resched();
+        kernel_fpu_begin();
     }
 
     residual = acts.residual3 + (L-1) * B * T * C;
@@ -779,13 +807,18 @@ int gpt2_generate_next_token(struct gpt2_model *model, const char *prompt, char 
     }
 
     // Run the model forward pass
-    gpt2_forward(model, gen_tokens, NULL, B, T);
 
+    gpt2_forward(model, gen_tokens, NULL, B, T);
+    
+    cond_resched();
+    kernel_fpu_begin();
     // Get the next token probabilities
     float *probs = model->acts.probs + (num_prompt_tokens-1) * model->config.padded_vocab_size;
     float coin;
     random_f32(&rng_state, &coin);
     int next_token = sample_mult(probs, model->config.vocab_size, coin);
+    kernel_fpu_end();
+    cond_resched();
     
     // Stop if we hit the end token
     if (next_token == tokenizer.eot_token) {
