@@ -1,14 +1,12 @@
 /*
 Defines the GPT-2 Tokenizer.
-Only supports decoding, i.e.: tokens (integers) -> strings
-This is all we need for unconditional generation.
-If we wanted to later prompt the model, we'd have to add decoding.
-Which could be tricky in C because of the regex involved, to look into later.
+Supports both encoding (text -> tokens) and decoding (tokens -> text).
 */
 
 #include <stdint.h>
 #include <ctype.h>
 #include <assert.h>
+#include <string.h>
 // our own utilities
 // defines fopenCheck, freadCheck, fcloseCheck, fseekCheck, mallocCheck
 #include "utils.h"
@@ -20,6 +18,10 @@ typedef struct {
     char **token_table;
     int init_ok;
     int eot_token; // <|endoftext|> token id
+    // for encoding
+    uint32_t *token_lengths; // length of each token
+    uint32_t max_token_length; // maximum token length
+    uint32_t byte_token_start; // index where byte tokens start
 } Tokenizer;
 
 void safe_printf(const char *piece) {
@@ -70,6 +72,24 @@ void tokenizer_init(Tokenizer *tokenizer, const char *filename) {
     // read in all the tokens
     unsigned char length;
     tokenizer->token_table = (char **)mallocCheck(tokenizer->vocab_size * sizeof(char *));
+    tokenizer->token_lengths = (uint32_t *)mallocCheck(tokenizer->vocab_size * sizeof(uint32_t));
+    tokenizer->max_token_length = 0;
+    tokenizer->byte_token_start = 0;
+    
+    // First pass: find where byte tokens start
+    for (uint32_t i = 0; i < tokenizer->vocab_size; i++) {
+        freadCheck(&length, sizeof(unsigned char), 1, file);
+        if (length == 1) {
+            tokenizer->byte_token_start = i;
+            break;
+        }
+        // Skip the token bytes for now
+        fseek(file, length, SEEK_CUR);
+    }
+    // Reset file position
+    fseek(file, sizeof(uint32_t) * 256, SEEK_SET);
+    
+    // Second pass: read all tokens
     for (uint32_t i = 0; i < tokenizer->vocab_size; i++) {
         freadCheck(&length, sizeof(unsigned char), 1, file);
         assert(length > 0); // every token should be at least one character
@@ -77,6 +97,10 @@ void tokenizer_init(Tokenizer *tokenizer, const char *filename) {
         freadCheck(token_bytes, sizeof(char), length, file);
         token_bytes[length] = '\0';  // Add null terminator for printing
         tokenizer->token_table[i] = token_bytes;
+        tokenizer->token_lengths[i] = length;
+        if (length > tokenizer->max_token_length) {
+            tokenizer->max_token_length = length;
+        }
     }
     // cleanups
     fcloseCheck(file);
@@ -95,11 +119,69 @@ const char *tokenizer_decode(Tokenizer *tokenizer, uint32_t token_id) {
     }
 }
 
+// Helper function to find the longest matching token at a given position
+uint32_t find_longest_token(Tokenizer *tokenizer, const char *text, size_t text_len, size_t pos) {
+    uint32_t best_token = tokenizer->vocab_size; // Use vocab_size as sentinel value
+    size_t best_length = 0;
+    
+    // Try each token in the vocabulary
+    for (uint32_t i = 0; i < tokenizer->vocab_size; i++) {
+        size_t token_len = tokenizer->token_lengths[i];
+        // Skip if token is longer than remaining text
+        if (pos + token_len > text_len) continue;
+        
+        // Compare token with text at current position
+        if (strncmp(tokenizer->token_table[i], text + pos, token_len) == 0) {
+            if (token_len > best_length) {
+                best_length = token_len;
+                best_token = i;
+            }
+        }
+    }
+    
+    return best_token;
+}
+
+// Encode text into tokens
+void tokenizer_encode(Tokenizer *tokenizer, const char *text, uint32_t *tokens, size_t *num_tokens) {
+    if (tokenizer->init_ok == 0) {
+        *num_tokens = 0;
+        return;
+    }
+    
+    size_t text_len = strlen(text);
+    size_t pos = 0;
+    size_t token_count = 0;
+    const size_t max_tokens = 1024; // Reasonable limit for input text
+    
+    while (pos < text_len && token_count < max_tokens) {
+        uint32_t token = find_longest_token(tokenizer, text, text_len, pos);
+        
+        if (token == tokenizer->vocab_size) {
+            // No matching token found, encode as byte token
+            unsigned char byte = text[pos];
+            token = tokenizer->byte_token_start + byte;
+            if (token >= tokenizer->vocab_size) {
+                // If byte token is out of range, skip the character
+                pos++;
+                continue;
+            }
+        }
+        
+        tokens[token_count++] = token;
+        pos += tokenizer->token_lengths[token];
+    }
+    
+    
+    *num_tokens = token_count;
+}
+
 void tokenizer_free(Tokenizer *tokenizer) {
     if (tokenizer->init_ok) {
         for (uint32_t i = 0; i < tokenizer->vocab_size; i++) {
             free(tokenizer->token_table[i]);
         }
         free(tokenizer->token_table);
+        free(tokenizer->token_lengths);
     }
 }
