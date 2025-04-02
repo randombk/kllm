@@ -1,6 +1,5 @@
 CC ?= clang
-CFLAGS = -O0 -mgeneral-regs-only -Wno-unused-result -Wno-ignored-pragmas -Wno-unknown-attributes
-#EXTRA_CFLAGS += -mno-sse -mno-sse2 -msoft-float -lsoft-fp -mno-avx
+CFLAGS = -O3 -Wno-unused-result -Wno-ignored-pragmas -Wno-unknown-attributes
 LDFLAGS =
 LDLIBS = -lm
 INCLUDES =
