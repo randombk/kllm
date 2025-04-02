@@ -302,15 +302,12 @@ static int __init kllm_init(void)
     
     // Initialize GPT-2 model
     kernel_fpu_begin();
-    ret = gpt2_build_from_firmware(&gpt2, fw_model);
+    ret = gpt2_build_from_firmware(&gpt2, fw_model, fw_tokenizer);
     kernel_fpu_end();
     if (ret) {
         printk(KERN_ERR "KLLM: Failed to initialize GPT-2 model\n");
         goto fail_gpt2;
     }
-    
-    // Set the tokenizer firmware in the model
-    gpt2.fw_tokenizer = fw_tokenizer;
     
     printk(KERN_INFO "KLLM: Module loaded successfully! Major number: %d\n", major_number);
     printk(KERN_INFO "KLLM: Device created at /dev/%s\n", DEVICE_NAME);

@@ -70,7 +70,7 @@ struct gpt2_model {
     int batch_size;
     int seq_len;
     int *inputs;
-    const struct firmware *fw_tokenizer; // Tokenizer firmware
+    struct tokenizer tokenizer; // Store initialized tokenizer
 };
 
 // Tokenizer structure
@@ -91,7 +91,7 @@ void tokenizer_encode(struct tokenizer *tokenizer, const char *text, uint32_t *t
 void tokenizer_free(struct tokenizer *tokenizer);
 
 // Function declarations
-int gpt2_build_from_firmware(struct gpt2_model *model, const struct firmware *fw);
+int gpt2_build_from_firmware(struct gpt2_model *model, const struct firmware *model_fw, const struct firmware *tokenizer_fw);
 void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t B, size_t T);
 void gpt2_free(struct gpt2_model *model);
 int gpt2_generate_next_token(struct gpt2_model *model, const char *prompt, char *output);

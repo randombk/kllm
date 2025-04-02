@@ -495,14 +495,26 @@ static float *malloc_and_point_activations(struct activation_tensors *acts, size
 }
 
 // Main model functions
-int gpt2_build_from_firmware(struct gpt2_model *model, const struct firmware *fw) {
-    if (!fw || !fw->data || !fw->size) {
-        pr_err("Invalid firmware data\n");
+int gpt2_build_from_firmware(struct gpt2_model *model, const struct firmware *model_fw, const struct firmware *tokenizer_fw) {
+    if (!model_fw || !model_fw->data || !model_fw->size) {
+        pr_err("Invalid model firmware data\n");
+        return -EINVAL;
+    }
+
+    if (!tokenizer_fw || !tokenizer_fw->data || !tokenizer_fw->size) {
+        pr_err("Invalid tokenizer firmware data\n");
+        return -EINVAL;
+    }
+
+    // Initialize tokenizer first
+    tokenizer_init(&model->tokenizer, tokenizer_fw);
+    if (!model->tokenizer.init_ok) {
+        pr_err("Failed to initialize tokenizer\n");
         return -EINVAL;
     }
 
     // Read model header
-    const int *model_header = (const int *)fw->data;
+    const int *model_header = (const int *)model_fw->data;
     if (model_header[0] != 20240326) {
         pr_err("Bad magic model file\n");
         return -EINVAL;
@@ -544,14 +556,13 @@ int gpt2_build_from_firmware(struct gpt2_model *model, const struct firmware *fw
     }
 
     // Copy parameters from firmware
-    memcpy(model->params_memory, fw->data + sizeof(int) * 256, num_parameters * sizeof(float));
+    memcpy(model->params_memory, model_fw->data + sizeof(int) * 256, num_parameters * sizeof(float));
 
     // Initialize other fields
     model->acts_memory = NULL;
     model->inputs = NULL;
     model->batch_size = 0;
     model->seq_len = 0;
-    model->fw_tokenizer = NULL; // Will be set by the caller
 
     return 0;
 }
@@ -647,75 +658,89 @@ void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t B,
         kernel_fpu_end();
 
         cond_resched();
-        pr_info("[GPT-2] layer %d: layernorm 1\n", l);
+        pr_info("[GPT-2] layer %d: layernorm 1\n", l+1);
         kernel_fpu_begin();
         layernorm_forward(l_ln1, residual, l_ln1w, l_ln1b, B, T, C);
         kernel_fpu_end();
 
         cond_resched();
-        pr_info("[GPT-2] layer %d: matmul 1\n", l);
+        pr_info("[GPT-2] layer %d: matmul 1\n", l+1);
         kernel_fpu_begin();
         matmul_forward(l_qkv, l_ln1, l_qkvw, l_qkvb, B, T, C, 3*C);
         kernel_fpu_end();
 
         cond_resched();
-        pr_info("[GPT-2] layer %d: attention\n", l);
+        pr_info("[GPT-2] layer %d: attention\n", l+1);
         kernel_fpu_begin();
         attention_forward(l_atty, l_preatt, l_att, l_qkv, B, T, C, NH);
         kernel_fpu_end();
 
         cond_resched();
-        pr_info("[GPT-2] layer %d: matmul 2\n", l);
+        pr_info("[GPT-2] layer %d: matmul 2\n", l+1);
         kernel_fpu_begin();
         matmul_forward(l_attproj, l_atty, l_attprojw, l_attprojb, B, T, C, C);
         kernel_fpu_end();
 
         cond_resched();
-        pr_info("[GPT-2] layer %d: residual 1\n", l);
+        pr_info("[GPT-2] layer %d: residual 1\n", l+1);
         kernel_fpu_begin();
         residual_forward(l_residual2, residual, l_attproj, B*T*C);
         kernel_fpu_end();
 
         cond_resched();
-        pr_info("[GPT-2] layer %d: layernorm 2\n", l);
+        pr_info("[GPT-2] layer %d: layernorm 2\n", l+1);
         kernel_fpu_begin();
         layernorm_forward(l_ln2, l_residual2, l_ln2w, l_ln2b, B, T, C);
         kernel_fpu_end();
 
         cond_resched();
-        pr_info("[GPT-2] layer %d: matmul 3\n", l);
+        pr_info("[GPT-2] layer %d: matmul 3\n", l+1);
         kernel_fpu_begin();
         matmul_forward(l_fch, l_ln2, l_fcw, l_fcb, B, T, C, 4*C);
         kernel_fpu_end();
 
         cond_resched();
-        pr_info("[GPT-2] layer %d: gelu\n", l);
+        pr_info("[GPT-2] layer %d: gelu\n", l+1);
         kernel_fpu_begin();
         gelu_forward(l_fch_gelu, l_fch, B*T*4*C);
         kernel_fpu_end();
 
         cond_resched();
-        pr_info("[GPT-2] layer %d: matmul 4\n", l);
+        pr_info("[GPT-2] layer %d: matmul 4\n", l+1);
         kernel_fpu_begin();
         matmul_forward(l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, B, T, 4*C, C);
         kernel_fpu_end();
 
         cond_resched();
-        pr_info("[GPT-2] layer %d: residual 2\n", l);
+        pr_info("[GPT-2] layer %d: residual 2\n", l+1);
         kernel_fpu_begin();
         residual_forward(l_residual3, l_residual2, l_fcproj, B*T*C);
         kernel_fpu_end();
 
         cond_resched();
-        pr_info("[GPT-2] layer %d: layernorm 3\n", l);
+        pr_info("[GPT-2] layer %d: layernorm 3\n", l+1);
         kernel_fpu_begin();
     }
 
     residual = acts.residual3 + (L-1) * B * T * C;
+    kernel_fpu_end();
+
+    cond_resched();
+    pr_info("[GPT-2] layernorm_forward\n");
+    kernel_fpu_begin();
     layernorm_forward(acts.lnf, residual, params.lnfw, params.lnfb, B, T, C);
+    kernel_fpu_end();
+
+    cond_resched();
+    pr_info("[GPT-2] matmul_forward\n");
+    kernel_fpu_begin();
     matmul_forward(acts.logits, acts.lnf, params.wte, NULL, B, T, C, Vp);
+    kernel_fpu_end();
+
+    cond_resched();
+    pr_info("[GPT-2] softmax_forward\n");
+    kernel_fpu_begin();
     softmax_forward(acts.probs, acts.logits, B, T, V, Vp);
-    
     kernel_fpu_end();
 }
 
@@ -726,6 +751,8 @@ void gpt2_free(struct gpt2_model *model) {
         vfree(model->acts_memory);
     if (model->inputs)
         vfree(model->inputs);
+    if (model->tokenizer.init_ok)
+        tokenizer_free(&model->tokenizer);
 }
 
 // Random number generation for sampling
@@ -758,16 +785,8 @@ int gpt2_generate_next_token(struct gpt2_model *model, const char *prompt, char 
         return -EINVAL;
     }
 
-    if (!model->fw_tokenizer) {
-        pr_err("Tokenizer firmware not set\n");
-        return -EINVAL;
-    }
-
-    // Initialize tokenizer
-    struct tokenizer tokenizer;
-    tokenizer_init(&tokenizer, model->fw_tokenizer);
-    if (!tokenizer.init_ok) {
-        pr_err("Failed to initialize tokenizer\n");
+    if (!model->tokenizer.init_ok) {
+        pr_err("Tokenizer not initialized properly\n");
         return -EINVAL;
     }
 
@@ -777,7 +796,6 @@ int gpt2_generate_next_token(struct gpt2_model *model, const char *prompt, char 
     int *gen_tokens = vmalloc(B * T * sizeof(int));
     if (!gen_tokens) {
         pr_err("Failed to allocate generation tokens\n");
-        tokenizer_free(&tokenizer);
         return -ENOMEM;
     }
     memset(gen_tokens, 0, B * T * sizeof(int));
@@ -786,16 +804,14 @@ int gpt2_generate_next_token(struct gpt2_model *model, const char *prompt, char 
 
     // Encode the prompt
     size_t num_prompt_tokens;
-    tokenizer_encode(&tokenizer, prompt, gen_tokens, &num_prompt_tokens);
+    tokenizer_encode(&model->tokenizer, prompt, gen_tokens, &num_prompt_tokens);
     if (num_prompt_tokens == 0) {
         pr_err("Failed to encode prompt\n");
         vfree(gen_tokens);
-        tokenizer_free(&tokenizer);
         return -EINVAL;
     }
 
     // Run the model forward pass
-
     gpt2_forward(model, gen_tokens, NULL, B, T);
     
     cond_resched();
@@ -809,17 +825,15 @@ int gpt2_generate_next_token(struct gpt2_model *model, const char *prompt, char 
     cond_resched();
     
     // Stop if we hit the end token
-    if (next_token == tokenizer.eot_token) {
+    if (next_token == model->tokenizer.eot_token) {
         vfree(gen_tokens);
-        tokenizer_free(&tokenizer);
         return 0; // End of generation
     }
     
     // Decode the token to output
-    const char *token_str = tokenizer_decode(&tokenizer, next_token);
+    const char *token_str = tokenizer_decode(&model->tokenizer, next_token);
     if (!token_str) {
         vfree(gen_tokens);
-        tokenizer_free(&tokenizer);
         return -EINVAL;
     }
 
@@ -829,7 +843,6 @@ int gpt2_generate_next_token(struct gpt2_model *model, const char *prompt, char 
     
     // Cleanup
     vfree(gen_tokens);
-    tokenizer_free(&tokenizer);
 
     return strlen(token_str);
 }
