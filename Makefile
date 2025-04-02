@@ -1,33 +1,27 @@
 CC ?= clang
-CFLAGS = -Ofast -Wno-unused-result -Wno-ignored-pragmas -Wno-unknown-attributes
+CFLAGS = -O0 -mgeneral-regs-only -Wno-unused-result -Wno-ignored-pragmas -Wno-unknown-attributes
+#EXTRA_CFLAGS += -mno-sse -mno-sse2 -msoft-float -lsoft-fp -mno-avx
 LDFLAGS =
 LDLIBS = -lm
 INCLUDES =
 
+CC_FLAGS_FPU := -mhard-float
+CFLAGS_kllm_gpt2.o += $(CC_FLAGS_FPU)
+CFLAGS_REMOVE_kllm_gpt2.o += $(CC_FLAGS_NO_FPU)
+
 # We will place .o files in the `build` directory (create it if it doesn't exist)
-BUILD_DIR = build
-$(shell mkdir -p $(BUILD_DIR))
-REMOVE_BUILD_OBJECT_FILES := rm -f $(BUILD_DIR)/*.o
 REMOVE_FILES = rm -f
 OUTPUT_FILE = -o $@
 
 # PHONY means these targets will always be executed
-.PHONY: all infer_gpt2 clean
+.PHONY: all clean
 
 obj-m += kllm.o
+kllm-objs += kllm_main.o kllm_gpt2.o
 
-kllm:
+all:
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
-
-# Add targets
-TARGETS = infer_gpt2
-
-all: $(TARGETS)
-
-infer_gpt2: infer_gpt2.c
-	$(CC) $(CFLAGS) $(INCLUDES) $(LDFLAGS) $^ $(LDLIBS) $(OUTPUT_FILE)
 
 clean:
 	$(REMOVE_FILES) $(TARGETS)
-	$(REMOVE_BUILD_OBJECT_FILES)
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean

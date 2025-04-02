@@ -9,6 +9,9 @@
 #include <linux/uaccess.h>
 #include <linux/firmware.h>
 #include <linux/version.h>
+#include <linux/mutex.h>
+#include <asm/fpu/api.h>
+#include "kllm_gpt2.h"
 
 #define DEVICE_NAME "llm0"
 #define CLASS_NAME "kllm"
@@ -21,6 +24,7 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("David Li (randombk)");
 MODULE_DESCRIPTION("LLM Inference in the Kernel");
 MODULE_VERSION("0.1");
+MODULE_SOFTDEP("pre: kernel-fpu");
 
 static int major_number;
 static struct class *kllm_class = NULL;
@@ -31,9 +35,15 @@ static struct cdev kllm_cdev;
 static const struct firmware *fw_model = NULL;
 static const struct firmware *fw_tokenizer = NULL;
 
+// GPT-2 model instance
+static struct gpt2_model gpt2;
+
 // Device buffers
 static char *input_buffer = NULL;
 static char *output_buffer = NULL;
+
+// Device mutex
+static struct mutex kllm_mutex;
 
 // Device open function
 static int kllm_open(struct inode *inode, struct file *file)
@@ -50,11 +60,24 @@ static int kllm_release(struct inode *inode, struct file *file)
 }
 
 // Process input and generate response
-// This is a simplified placeholder - a real implementation would use the loaded models
 static void process_input(const char *input, char *output, size_t max_len)
 {
-    // A very simple echo response for demonstration
-    snprintf(output, max_len, "KLLM response to: %s", input);
+    int ret;
+    size_t output_len = 0;
+
+    // Generate response using GPT-2
+    kernel_fpu_begin();
+    ret = gpt2_generate(&gpt2, input, output, max_len);
+    kernel_fpu_end();
+    if (ret < 0) {
+        snprintf(output, max_len, "Error generating response: %d", ret);
+        return;
+    }
+
+    output_len = strlen(output);
+    if (output_len >= max_len) {
+        output[max_len - 1] = '\0';
+    }
 }
 
 // Device write function
@@ -63,11 +86,18 @@ static ssize_t kllm_write(struct file *file, const char __user *buffer,
 {
     size_t bytes_to_copy = min((size_t)MAX_INPUT_SIZE, len);
     
+    // Try to acquire the mutex
+    if (!mutex_trylock(&kllm_mutex)) {
+        printk(KERN_ERR "KLLM: Device is busy processing another request\n");
+        return -EBUSY;
+    }
+    
     // Clear input buffer
     memset(input_buffer, 0, MAX_INPUT_SIZE);
     
     // Copy from user space to kernel space
     if (copy_from_user(input_buffer, buffer, bytes_to_copy)) {
+        mutex_unlock(&kllm_mutex);
         printk(KERN_ERR "KLLM: Failed to copy from user space\n");
         return -EFAULT;
     }
@@ -88,20 +118,28 @@ static ssize_t kllm_read(struct file *file, char __user *buffer,
     size_t bytes_to_copy;
     
     // Check if we've already sent the entire response
-    if (*offset >= response_len)
+    if (*offset >= response_len) {
+        mutex_unlock(&kllm_mutex);
         return 0;
+    }
     
     // Calculate how many bytes to copy
     bytes_to_copy = min(len, response_len - *offset);
     
     // Copy from kernel space to user space
     if (copy_to_user(buffer, output_buffer + *offset, bytes_to_copy)) {
+        mutex_unlock(&kllm_mutex);
         printk(KERN_ERR "KLLM: Failed to copy to user space\n");
         return -EFAULT;
     }
     
     // Update the offset for subsequent reads
     *offset += bytes_to_copy;
+    
+    // If we've sent the entire response, release the mutex
+    if (*offset >= response_len) {
+        mutex_unlock(&kllm_mutex);
+    }
     
     return bytes_to_copy;
 }
@@ -119,6 +157,9 @@ static struct file_operations kllm_fops = {
 static int __init kllm_init(void)
 {
     int ret;
+    
+    // Initialize the mutex
+    mutex_init(&kllm_mutex);
     
     // Allocate device buffers
     input_buffer = kmalloc(MAX_INPUT_SIZE, GFP_KERNEL);
@@ -180,6 +221,18 @@ static int __init kllm_init(void)
         goto fail_fw_tokenizer;
     }
     
+    // Initialize GPT-2 model
+    kernel_fpu_begin();
+    ret = gpt2_build_from_firmware(&gpt2, fw_model);
+    kernel_fpu_end();
+    if (ret) {
+        printk(KERN_ERR "KLLM: Failed to initialize GPT-2 model\n");
+        goto fail_gpt2;
+    }
+    
+    // Set the tokenizer firmware in the model
+    gpt2.fw_tokenizer = fw_tokenizer;
+    
     printk(KERN_INFO "KLLM: Module loaded successfully! Major number: %d\n", major_number);
     printk(KERN_INFO "KLLM: Device created at /dev/%s\n", DEVICE_NAME);
     printk(KERN_INFO "KLLM: Loaded model (%zu bytes) and tokenizer (%zu bytes)\n", 
@@ -187,6 +240,8 @@ static int __init kllm_init(void)
     
     return 0;
     
+fail_gpt2:
+    release_firmware(fw_tokenizer);
 fail_fw_tokenizer:
     release_firmware(fw_model);
 fail_fw_model:
@@ -207,6 +262,9 @@ fail_alloc:
 // Module cleanup function
 static void __exit kllm_exit(void)
 {
+    // Free GPT-2 model
+    gpt2_free(&gpt2);
+    
     // Release firmware
     if (fw_tokenizer)
         release_firmware(fw_tokenizer);
@@ -222,6 +280,9 @@ static void __exit kllm_exit(void)
     // Free memory
     kfree(input_buffer);
     kfree(output_buffer);
+    
+    // Destroy the mutex
+    mutex_destroy(&kllm_mutex);
     
     printk(KERN_INFO "KLLM: Module unloaded\n");
 }

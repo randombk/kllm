@@ -12,7 +12,7 @@ SAVE_DIR_PARENT="$SCRIPT_DIR"
 # Files to download
 FILES=(
     "gpt2_124M.bin"
-    "gpt2_124M_bf16.bin"
+    # "gpt2_124M_bf16.bin"
     "gpt2_tokenizer.bin"
 )
 
