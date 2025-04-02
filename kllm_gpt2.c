@@ -229,124 +229,114 @@ void kernel_tanh(float x, float *result)
 
 // Forward declarations of internal functions
 static void fill_in_parameter_sizes(size_t *param_sizes, struct gpt2_config config);
-static void fill_in_activation_sizes(size_t *act_sizes, struct gpt2_config config, int B, int T);
+static void fill_in_activation_sizes(size_t *act_sizes, struct gpt2_config config, int T);
 static float *malloc_and_point_parameters(struct parameter_tensors *params, size_t *param_sizes);
 static float *malloc_and_point_activations(struct activation_tensors *acts, size_t *act_sizes);
 
 // Layer forward pass implementations
-static void encoder_forward(float *out, int *inp, float *wte, float *wpe, int B, int T, int C) {
-    for (int b = 0; b < B; b++) {
-        for (int t = 0; t < T; t++) {
-            float *out_bt = out + b * T * C + t * C;
-            int ix = inp[b * T + t];
-            float *wte_ix = wte + ix * C;
-            float *wpe_t = wpe + t * C;
-            for (int i = 0; i < C; i++) {
-                out_bt[i] = wte_ix[i] + wpe_t[i];
-            }
+static void encoder_forward(float *out, int *inp, float *wte, float *wpe, int T, int C) {
+    for (int t = 0; t < T; t++) {
+        float *out_t = out + t * C;
+        int ix = inp[t];
+        float *wte_ix = wte + ix * C;
+        float *wpe_t = wpe + t * C;
+        for (int i = 0; i < C; i++) {
+            out_t[i] = wte_ix[i] + wpe_t[i];
         }
     }
 }
 
-static void layernorm_forward(float *out, float *inp, float *weight, float *bias, int B, int T, int C) {
+static void layernorm_forward(float *out, float *inp, float *weight, float *bias, int T, int C) {
     float eps = 1e-5f;
-    for (int b = 0; b < B; b++) {
-        for (int t = 0; t < T; t++) {
-            float *x = inp + b * T * C + t * C;
-            float m = 0.0f;
-            for (int i = 0; i < C; i++) {
-                m += x[i];
-            }
-            m = m/C;
-            float v = 0.0f;
-            for (int i = 0; i < C; i++) {
-                float xshift = x[i] - m;
-                v += xshift * xshift;
-            }
-            v = v/C;
-            float ret;
-            kernel_sqrt(v + eps, &ret);
-            float s = 1.0f / ret;
-            float *out_bt = out + b * T * C + t * C;
-            for (int i = 0; i < C; i++) {
-                float n = (s * (x[i] - m));
-                float o = n * weight[i] + bias[i];
-                out_bt[i] = o;
-            }
+    for (int t = 0; t < T; t++) {
+        float *x = inp + t * C;
+        float m = 0.0f;
+        for (int i = 0; i < C; i++) {
+            m += x[i];
+        }
+        m = m/C;
+        float v = 0.0f;
+        for (int i = 0; i < C; i++) {
+            float xshift = x[i] - m;
+            v += xshift * xshift;
+        }
+        v = v/C;
+        float ret;
+        kernel_sqrt(v + eps, &ret);
+        float s = 1.0f / ret;
+        float *out_t = out + t * C;
+        for (int i = 0; i < C; i++) {
+            float n = (s * (x[i] - m));
+            float o = n * weight[i] + bias[i];
+            out_t[i] = o;
         }
     }
 }
 
 static void matmul_forward(float *out, const float *inp, const float *weight, const float *bias,
-                          int B, int T, int C, int OC) {
-    for (int b = 0; b < B; b++) {
-        for (int t = 0; t < T; t++) {
-            int bt = b * T + t;
-            for (int o = 0; o < OC; o++) {
-                float val = (bias != NULL) ? bias[o] : 0.0f;
-                for (int i = 0; i < C; i++) {
-                    float weight_val = weight[o*C + i];
-                    float inp_val = inp[bt * C + i];
-                    float res;
-                    val += inp_val * weight_val;
-                }
-                out[bt * OC + o] = val;
+                          int T, int C, int OC) {
+    for (int t = 0; t < T; t++) {
+        for (int o = 0; o < OC; o++) {
+            float val = (bias != NULL) ? bias[o] : 0.0f;
+            for (int i = 0; i < C; i++) {
+                float weight_val = weight[o*C + i];
+                float inp_val = inp[t * C + i];
+                val += inp_val * weight_val;
             }
+            out[t * OC + o] = val;
         }
     }
 }
 
 static void attention_forward(float *out, float *preatt, float *att, float *inp,
-                            int B, int T, int C, int NH) {
+                            int T, int C, int NH) {
     int C3 = C*3;
     int hs = C / NH;
     float ret;
     kernel_sqrt(hs, &ret);
     float scale = 1.0f / ret;
 
-    for (int b = 0; b < B; b++) {
-        for (int t = 0; t < T; t++) {
-            for (int h = 0; h < NH; h++) {
-                float *query_t = inp + b * T * C3 + t * C3 + h * hs;
-                float *att_bth = att + b*NH*T*T + h*T*T + t*T;
+    for (int t = 0; t < T; t++) {
+        for (int h = 0; h < NH; h++) {
+            float *query_t = inp + t * C3 + h * hs;
+            float *att_th = att + h*T*T + t*T;
 
-                float maxval = -10000.0f;
-                for (int t2 = 0; t2 <= t; t2++) {
-                    float *key_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C;
-                    float val = 0.0f;
-                    for (int i = 0; i < hs; i++) {
-                        val += query_t[i] * key_t2[i];
-                    }
-                    val *= scale;
-                    if (val > maxval) maxval = val;
-                    att_bth[t2] = val;
+            float maxval = -10000.0f;
+            for (int t2 = 0; t2 <= t; t2++) {
+                float *key_t2 = inp + t2 * C3 + h * hs + C;
+                float val = 0.0f;
+                for (int i = 0; i < hs; i++) {
+                    val += query_t[i] * key_t2[i];
                 }
+                val *= scale;
+                if (val > maxval) maxval = val;
+                att_th[t2] = val;
+            }
 
-                float expsum = 0.0f;
-                for (int t2 = 0; t2 <= t; t2++) {
-                    float expv;
-                    kernel_exp(att_bth[t2] - maxval, &expv);
-                    expsum += expv;
-                    att_bth[t2] = expv;
+            float expsum = 0.0f;
+            for (int t2 = 0; t2 <= t; t2++) {
+                float expv;
+                kernel_exp(att_th[t2] - maxval, &expv);
+                expsum += expv;
+                att_th[t2] = expv;
+            }
+            float expsum_inv = 1.0f / expsum;
+
+            for (int t2 = 0; t2 < T; t2++) {
+                if (t2 <= t) {
+                    att_th[t2] *= expsum_inv;
+                } else {
+                    att_th[t2] = 0.0f;
                 }
-                float expsum_inv = 1.0f / expsum;
+            }
 
-                for (int t2 = 0; t2 < T; t2++) {
-                    if (t2 <= t) {
-                        att_bth[t2] *= expsum_inv;
-                    } else {
-                        att_bth[t2] = 0.0f;
-                    }
-                }
-
-                float *out_bth = out + b * T * C + t * C + h * hs;
-                for (int i = 0; i < hs; i++) { out_bth[i] = 0.0f; }
-                for (int t2 = 0; t2 <= t; t2++) {
-                    float *value_t2 = inp + b * T * C3 + t2 * C3 + h * hs + C*2;
-                    float att_btht2 = att_bth[t2];
-                    for (int i = 0; i < hs; i++) {
-                        out_bth[i] += att_btht2 * value_t2[i];
-                    }
+            float *out_th = out + t * C + h * hs;
+            for (int i = 0; i < hs; i++) { out_th[i] = 0.0f; }
+            for (int t2 = 0; t2 <= t; t2++) {
+                float *value_t2 = inp + t2 * C3 + h * hs + C*2;
+                float att_tht2 = att_th[t2];
+                for (int i = 0; i < hs; i++) {
+                    out_th[i] += att_tht2 * value_t2[i];
                 }
             }
         }
@@ -425,27 +415,27 @@ static void fill_in_parameter_sizes(size_t *param_sizes, struct gpt2_config conf
 }
 
 // Activation size calculation
-static void fill_in_activation_sizes(size_t *act_sizes, struct gpt2_config config, int B, int T) {
+static void fill_in_activation_sizes(size_t *act_sizes, struct gpt2_config config, int T) {
     size_t C = config.channels;
     size_t NH = config.num_heads;
     size_t L = config.num_layers;
     size_t Vp = config.padded_vocab_size;
-    act_sizes[0] = B * T * C; // encoded
-    act_sizes[1] = L * B * T * C; // ln1
-    act_sizes[2] = L * B * T * 3 * C; // qkv
-    act_sizes[3] = L * B * T * C; // atty
-    act_sizes[4] = L * B * NH * T * T; // preatt
-    act_sizes[5] = L * B * NH * T * T; // att
-    act_sizes[6] = L * B * T * C; // attproj
-    act_sizes[7] = L * B * T * C; // residual2
-    act_sizes[8] = L * B * T * C; // ln2
-    act_sizes[9] = L * B * T * 4 * C; // fch
-    act_sizes[10] = L * B * T * 4 * C; // fch_gelu
-    act_sizes[11] = L * B * T * C; // fcproj
-    act_sizes[12] = L * B * T * C; // residual3
-    act_sizes[13] = B * T * C; // lnf
-    act_sizes[14] = B * T * Vp; // logits
-    act_sizes[15] = B * T * Vp; // probs
+    act_sizes[0] = T * C; // encoded
+    act_sizes[1] = L * T * C; // ln1
+    act_sizes[2] = L * T * 3 * C; // qkv
+    act_sizes[3] = L * T * C; // atty
+    act_sizes[4] = L * NH * T * T; // preatt
+    act_sizes[5] = L * NH * T * T; // att
+    act_sizes[6] = L * T * C; // attproj
+    act_sizes[7] = L * T * C; // residual2
+    act_sizes[8] = L * T * C; // ln2
+    act_sizes[9] = L * T * 4 * C; // fch
+    act_sizes[10] = L * T * 4 * C; // fch_gelu
+    act_sizes[11] = L * T * C; // fcproj
+    act_sizes[12] = L * T * C; // residual3
+    act_sizes[13] = T * C; // lnf
+    act_sizes[14] = T * Vp; // logits
+    act_sizes[15] = T * Vp; // probs
 }
 
 // Memory allocation helpers
@@ -561,13 +551,12 @@ int gpt2_build_from_firmware(struct gpt2_model *model, const struct firmware *mo
     // Initialize other fields
     model->acts_memory = NULL;
     model->inputs = NULL;
-    model->batch_size = 0;
     model->seq_len = 0;
 
     return 0;
 }
 
-void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t B, size_t T) {
+void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t T) {
     pr_info("[GPT-2] Beginning forward pass\n");
     if (!model->params_memory) {
         pr_err("Model not initialized properly\n");
@@ -581,7 +570,7 @@ void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t B,
     size_t C = model->config.channels;
 
     // Validate inputs
-    for(int i = 0; i < B * T; i++) {
+    for(int i = 0; i < T; i++) {
         if (!(0 <= inputs[i] && inputs[i] < V)) {
             pr_err("Invalid input token: %d\n", inputs[i]);
             return;
@@ -590,9 +579,8 @@ void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t B,
 
     // Allocate activations if needed
     if (!model->acts_memory) {
-        model->batch_size = B;
         model->seq_len = T;
-        fill_in_activation_sizes(model->act_sizes, model->config, B, T);
+        fill_in_activation_sizes(model->act_sizes, model->config, T);
         size_t num_activations = 0;
         for (size_t i = 0; i < NUM_ACTIVATION_TENSORS; i++) {
             num_activations += model->act_sizes[i];
@@ -604,18 +592,18 @@ void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t B,
             pr_err("Failed to allocate activation memory\n");
             return;
         }
-        model->inputs = vmalloc(B * T * sizeof(int));
+        model->inputs = vmalloc(T * sizeof(int));
         if (!model->inputs) {
             pr_err("Failed to allocate input memory\n");
             return;
         }
-    } else if (B != model->batch_size || T != model->seq_len) {
-        pr_err("Invalid batch size or sequence length\n");
+    } else if (T != model->seq_len) {
+        pr_err("Invalid sequence length\n");
         return;
     }
 
     // Cache inputs
-    memcpy(model->inputs, inputs, B * T * sizeof(int));
+    memcpy(model->inputs, inputs, T * sizeof(int));
 
     // Forward pass
     struct parameter_tensors params = model->params;
@@ -625,9 +613,9 @@ void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t B,
     kernel_fpu_begin();
     float *residual;
 
-    encoder_forward(acts.encoded, inputs, params.wte, params.wpe, B, T, C);
+    encoder_forward(acts.encoded, inputs, params.wte, params.wpe, T, C);
     for (int l = 0; l < L; l++) {
-        residual = l == 0 ? acts.encoded : acts.residual3 + (l-1) * B * T * C;
+        residual = l == 0 ? acts.encoded : acts.residual3 + (l-1) * T * C;
 
         float *l_ln1w = params.ln1w + l * C;
         float *l_ln1b = params.ln1b + l * C;
@@ -642,79 +630,79 @@ void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t B,
         float *l_fcprojw = params.fcprojw + l * C * 4*C;
         float *l_fcprojb = params.fcprojb + l * C;
 
-        float *l_ln1 = acts.ln1 + l * B * T * C;
-        float *l_qkv = acts.qkv + l * B * T * 3*C;
-        float *l_atty = acts.atty + l * B * T * C;
-        float *l_preatt = acts.preatt + l * B * NH * T * T;
-        float *l_att = acts.att + l * B * NH * T * T;
-        float *l_attproj = acts.attproj + l * B * T * C;
-        float *l_residual2 = acts.residual2 + l * B * T * C;
-        float *l_ln2 = acts.ln2 + l * B * T * C;
-        float *l_fch = acts.fch + l * B * T * 4*C;
-        float *l_fch_gelu = acts.fch_gelu + l * B * T * 4*C;
-        float *l_fcproj = acts.fcproj + l * B * T * C;
-        float *l_residual3 = acts.residual3 + l * B * T * C;
+        float *l_ln1 = acts.ln1 + l * T * C;
+        float *l_qkv = acts.qkv + l * T * 3*C;
+        float *l_atty = acts.atty + l * T * C;
+        float *l_preatt = acts.preatt + l * NH * T * T;
+        float *l_att = acts.att + l * NH * T * T;
+        float *l_attproj = acts.attproj + l * T * C;
+        float *l_residual2 = acts.residual2 + l * T * C;
+        float *l_ln2 = acts.ln2 + l * T * C;
+        float *l_fch = acts.fch + l * T * 4*C;
+        float *l_fch_gelu = acts.fch_gelu + l * T * 4*C;
+        float *l_fcproj = acts.fcproj + l * T * C;
+        float *l_residual3 = acts.residual3 + l * T * C;
 
         kernel_fpu_end();
 
         cond_resched();
         pr_info("[GPT-2] layer %d: layernorm 1\n", l+1);
         kernel_fpu_begin();
-        layernorm_forward(l_ln1, residual, l_ln1w, l_ln1b, B, T, C);
+        layernorm_forward(l_ln1, residual, l_ln1w, l_ln1b, T, C);
         kernel_fpu_end();
 
         cond_resched();
         pr_info("[GPT-2] layer %d: matmul 1\n", l+1);
         kernel_fpu_begin();
-        matmul_forward(l_qkv, l_ln1, l_qkvw, l_qkvb, B, T, C, 3*C);
+        matmul_forward(l_qkv, l_ln1, l_qkvw, l_qkvb, T, C, 3*C);
         kernel_fpu_end();
 
         cond_resched();
         pr_info("[GPT-2] layer %d: attention\n", l+1);
         kernel_fpu_begin();
-        attention_forward(l_atty, l_preatt, l_att, l_qkv, B, T, C, NH);
+        attention_forward(l_atty, l_preatt, l_att, l_qkv, T, C, NH);
         kernel_fpu_end();
 
         cond_resched();
         pr_info("[GPT-2] layer %d: matmul 2\n", l+1);
         kernel_fpu_begin();
-        matmul_forward(l_attproj, l_atty, l_attprojw, l_attprojb, B, T, C, C);
+        matmul_forward(l_attproj, l_atty, l_attprojw, l_attprojb, T, C, C);
         kernel_fpu_end();
 
         cond_resched();
         pr_info("[GPT-2] layer %d: residual 1\n", l+1);
         kernel_fpu_begin();
-        residual_forward(l_residual2, residual, l_attproj, B*T*C);
+        residual_forward(l_residual2, residual, l_attproj, T*C);
         kernel_fpu_end();
 
         cond_resched();
         pr_info("[GPT-2] layer %d: layernorm 2\n", l+1);
         kernel_fpu_begin();
-        layernorm_forward(l_ln2, l_residual2, l_ln2w, l_ln2b, B, T, C);
+        layernorm_forward(l_ln2, l_residual2, l_ln2w, l_ln2b, T, C);
         kernel_fpu_end();
 
         cond_resched();
         pr_info("[GPT-2] layer %d: matmul 3\n", l+1);
         kernel_fpu_begin();
-        matmul_forward(l_fch, l_ln2, l_fcw, l_fcb, B, T, C, 4*C);
+        matmul_forward(l_fch, l_ln2, l_fcw, l_fcb, T, C, 4*C);
         kernel_fpu_end();
 
         cond_resched();
         pr_info("[GPT-2] layer %d: gelu\n", l+1);
         kernel_fpu_begin();
-        gelu_forward(l_fch_gelu, l_fch, B*T*4*C);
+        gelu_forward(l_fch_gelu, l_fch, T*4*C);
         kernel_fpu_end();
 
         cond_resched();
         pr_info("[GPT-2] layer %d: matmul 4\n", l+1);
         kernel_fpu_begin();
-        matmul_forward(l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, B, T, 4*C, C);
+        matmul_forward(l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, T, 4*C, C);
         kernel_fpu_end();
 
         cond_resched();
         pr_info("[GPT-2] layer %d: residual 2\n", l+1);
         kernel_fpu_begin();
-        residual_forward(l_residual3, l_residual2, l_fcproj, B*T*C);
+        residual_forward(l_residual3, l_residual2, l_fcproj, T*C);
         kernel_fpu_end();
 
         cond_resched();
@@ -722,25 +710,25 @@ void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t B,
         kernel_fpu_begin();
     }
 
-    residual = acts.residual3 + (L-1) * B * T * C;
+    residual = acts.residual3 + (L-1) * T * C;
     kernel_fpu_end();
 
     cond_resched();
     pr_info("[GPT-2] layernorm_forward\n");
     kernel_fpu_begin();
-    layernorm_forward(acts.lnf, residual, params.lnfw, params.lnfb, B, T, C);
+    layernorm_forward(acts.lnf, residual, params.lnfw, params.lnfb, T, C);
     kernel_fpu_end();
 
     cond_resched();
     pr_info("[GPT-2] matmul_forward\n");
     kernel_fpu_begin();
-    matmul_forward(acts.logits, acts.lnf, params.wte, NULL, B, T, C, Vp);
+    matmul_forward(acts.logits, acts.lnf, params.wte, NULL, T, C, Vp);
     kernel_fpu_end();
 
     cond_resched();
     pr_info("[GPT-2] softmax_forward\n");
     kernel_fpu_begin();
-    softmax_forward(acts.probs, acts.logits, B, T, V, Vp);
+    softmax_forward(acts.probs, acts.logits, 1, T, V, Vp);
     kernel_fpu_end();
 }
 
@@ -791,14 +779,13 @@ int gpt2_generate_next_token(struct gpt2_model *model, const char *prompt, char 
     }
 
     // Setup generation parameters
-    int B = 1; // batch size 1 for inference
     int T = model->config.max_seq_len; // use full sequence length
-    int *gen_tokens = vmalloc(B * T * sizeof(int));
+    int *gen_tokens = vmalloc(T * sizeof(int));
     if (!gen_tokens) {
         pr_err("Failed to allocate generation tokens\n");
         return -ENOMEM;
     }
-    memset(gen_tokens, 0, B * T * sizeof(int));
+    memset(gen_tokens, 0, T * sizeof(int));
     
     uint64_t rng_state = 1337; // fixed seed for reproducibility
 
@@ -812,7 +799,7 @@ int gpt2_generate_next_token(struct gpt2_model *model, const char *prompt, char 
     }
 
     // Run the model forward pass
-    gpt2_forward(model, gen_tokens, NULL, B, T);
+    gpt2_forward(model, gen_tokens, NULL, T);
     
     cond_resched();
     kernel_fpu_begin();
@@ -837,6 +824,7 @@ int gpt2_generate_next_token(struct gpt2_model *model, const char *prompt, char 
         return -EINVAL;
     }
 
+    pr_info("[GPT-2] Generated token: %s\n", token_str);
     size_t token_len = strlen(token_str);
     memcpy(output, token_str, token_len);
     output[token_len] = '\0';

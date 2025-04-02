@@ -22,8 +22,8 @@
 #define CLASS_NAME "kllm"
 #define FW_MODEL "kllm-gpt2.bin"
 #define FW_TOKENIZER "kllm-tokenizer.bin"
-#define MAX_INPUT_SIZE 4096
-#define MAX_OUTPUT_SIZE 16
+#define MAX_INPUT_SIZE 1024
+#define MAX_OUTPUT_SIZE 512
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("David Li (randombk)");

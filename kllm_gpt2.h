@@ -56,23 +56,6 @@ struct activation_tensors {
     float *probs;       // (B, T, V)
 };
 
-// Main GPT-2 model structure
-struct gpt2_model {
-    struct gpt2_config config;
-    struct parameter_tensors params;
-    size_t param_sizes[NUM_PARAMETER_TENSORS];
-    float *params_memory;
-    size_t num_parameters;
-    struct activation_tensors acts;
-    size_t act_sizes[NUM_ACTIVATION_TENSORS];
-    float *acts_memory;
-    size_t num_activations;
-    int batch_size;
-    int seq_len;
-    int *inputs;
-    struct tokenizer tokenizer; // Store initialized tokenizer
-};
-
 // Tokenizer structure
 struct tokenizer {
     uint32_t vocab_size;
@@ -84,6 +67,22 @@ struct tokenizer {
     uint32_t byte_token_start; // index where byte tokens start
 };
 
+// Main GPT-2 model structure
+struct gpt2_model {
+    struct gpt2_config config;
+    struct parameter_tensors params;
+    struct activation_tensors acts;
+    float *params_memory;
+    float *acts_memory;
+    int *inputs;
+    size_t num_parameters;
+    size_t num_activations;
+    size_t param_sizes[NUM_PARAMETER_TENSORS];
+    size_t act_sizes[NUM_ACTIVATION_TENSORS];
+    int seq_len;
+    struct tokenizer tokenizer; // Store initialized tokenizer
+};
+
 // Tokenizer function declarations
 void tokenizer_init(struct tokenizer *tokenizer, const struct firmware *fw);
 const char *tokenizer_decode(struct tokenizer *tokenizer, uint32_t token_id);
@@ -92,7 +91,7 @@ void tokenizer_free(struct tokenizer *tokenizer);
 
 // Function declarations
 int gpt2_build_from_firmware(struct gpt2_model *model, const struct firmware *model_fw, const struct firmware *tokenizer_fw);
-void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t B, size_t T);
+void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t T);
 void gpt2_free(struct gpt2_model *model);
 int gpt2_generate_next_token(struct gpt2_model *model, const char *prompt, char *output);
 
