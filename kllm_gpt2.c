@@ -835,7 +835,14 @@ int gpt2_generate_next_token(struct gpt2_model *model, const char *prompt, char 
         return -EINVAL;
     }
 
-    strcpy(output, token_str);
+    size_t token_len = strlen(token_str);
+    if (token_len >= MAX_OUTPUT_SIZE) {
+        vfree(gen_tokens);
+        tokenizer_free(&tokenizer);
+        return -EINVAL;
+    }
+    memcpy(output, token_str, token_len);
+    output[token_len] = '\0';
     
     // Cleanup
     vfree(gen_tokens);
