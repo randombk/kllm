@@ -4,7 +4,7 @@
 
 **THIS IS A JOKE - DO NOT ACTUALLY USE THIS**
 
-This repo ports a heavily-stripped down version of [llm.c](https://github.com/karpathy/llm.c) to the kernel. This currently *barely* works, and expect lots of timeouts and bugs. Only single-core CPU inference without any acceleration (SSE, AVX, etc.) is supported. Even for the 124M GPT-2 model, expect to wait 1m+ for a single token, during which time the system will be unresponsive.
+This repo ports a heavily-stripped down version of [llm.c](https://github.com/karpathy/llm.c) inference to the kernel. This currently *barely* works, and expect lots of timeouts and bugs. Only single-core CPU inference without any acceleration (SSE, AVX, etc.) is supported. Even for the 124M GPT-2 model, expect to wait 1m+ for a single token, during which time the system will be unresponsive.
 
 ![loading](loading.png)
 

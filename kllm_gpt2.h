@@ -36,12 +36,10 @@ struct parameter_tensors {
 };
 
 // Activation tensors for the model
-#define NUM_ACTIVATION_TENSORS 23
+#define NUM_ACTIVATION_TENSORS 16
 struct activation_tensors {
     float *encoded;     // (B, T, C)
     float *ln1;         // (L, B, T, C)
-    float *ln1_mean;    // (L, B, T)
-    float *ln1_rstd;    // (L, B, T)
     float *qkv;         // (L, B, T, 3*C)
     float *atty;        // (L, B, T, C)
     float *preatt;      // (L, B, NH, T, T)
@@ -49,18 +47,13 @@ struct activation_tensors {
     float *attproj;     // (L, B, T, C)
     float *residual2;   // (L, B, T, C)
     float *ln2;         // (L, B, T, C)
-    float *ln2_mean;    // (L, B, T)
-    float *ln2_rstd;    // (L, B, T)
     float *fch;         // (L, B, T, 4*C)
     float *fch_gelu;    // (L, B, T, 4*C)
     float *fcproj;      // (L, B, T, C)
     float *residual3;   // (L, B, T, C)
     float *lnf;         // (B, T, C)
-    float *lnf_mean;    // (B, T)
-    float *lnf_rstd;    // (B, T)
     float *logits;      // (B, T, V)
     float *probs;       // (B, T, V)
-    float *losses;      // (B, T)
 };
 
 // Main GPT-2 model structure
@@ -77,7 +70,6 @@ struct gpt2_model {
     int batch_size;
     int seq_len;
     int *inputs;
-    float mean_loss;
     const struct firmware *fw_tokenizer; // Tokenizer firmware
 };
 

@@ -400,18 +400,6 @@ static void softmax_forward(float *probs, float *logits, int B, int T, int V, in
     }
 }
 
-static void crossentropy_forward(float *losses, float *probs, int *targets, int B, int T, int Vp) {
-    for (int b = 0; b < B; b++) {
-        for (int t = 0; t < T; t++) {
-            float *probs_bt = probs + b * T * Vp + t * Vp;
-            int ix = targets[b * T + t];
-            float res;
-            kernel_log(probs_bt[ix], &res);
-            losses[b * T + t] = -res;
-        }
-    }
-}
-
 // Parameter size calculation
 static void fill_in_parameter_sizes(size_t *param_sizes, struct gpt2_config config) {
     size_t Vp = config.padded_vocab_size;
@@ -444,27 +432,20 @@ static void fill_in_activation_sizes(size_t *act_sizes, struct gpt2_config confi
     size_t Vp = config.padded_vocab_size;
     act_sizes[0] = B * T * C; // encoded
     act_sizes[1] = L * B * T * C; // ln1
-    act_sizes[2] = L * B * T; // ln1_mean
-    act_sizes[3] = L * B * T; // ln1_rstd
-    act_sizes[4] = L * B * T * 3 * C; // qkv
-    act_sizes[5] = L * B * T * C; // atty
-    act_sizes[6] = L * B * NH * T * T; // preatt
-    act_sizes[7] = L * B * NH * T * T; // att
-    act_sizes[8] = L * B * T * C; // attproj
-    act_sizes[9] = L * B * T * C; // residual2
-    act_sizes[10] = L * B * T * C; // ln2
-    act_sizes[11] = L * B * T; // ln2_mean
-    act_sizes[12] = L * B * T; // ln2_rstd
-    act_sizes[13] = L * B * T * 4 * C; // fch
-    act_sizes[14] = L * B * T * 4 * C; // fch_gelu
-    act_sizes[15] = L * B * T * C; // fcproj
-    act_sizes[16] = L * B * T * C; // residual3
-    act_sizes[17] = B * T * C; // lnf
-    act_sizes[18] = B * T; // lnf_mean
-    act_sizes[19] = B * T; // lnf_rstd
-    act_sizes[20] = B * T * Vp; // logits
-    act_sizes[21] = B * T * Vp; // probs
-    act_sizes[22] = B * T; // losses
+    act_sizes[2] = L * B * T * 3 * C; // qkv
+    act_sizes[3] = L * B * T * C; // atty
+    act_sizes[4] = L * B * NH * T * T; // preatt
+    act_sizes[5] = L * B * NH * T * T; // att
+    act_sizes[6] = L * B * T * C; // attproj
+    act_sizes[7] = L * B * T * C; // residual2
+    act_sizes[8] = L * B * T * C; // ln2
+    act_sizes[9] = L * B * T * 4 * C; // fch
+    act_sizes[10] = L * B * T * 4 * C; // fch_gelu
+    act_sizes[11] = L * B * T * C; // fcproj
+    act_sizes[12] = L * B * T * C; // residual3
+    act_sizes[13] = B * T * C; // lnf
+    act_sizes[14] = B * T * Vp; // logits
+    act_sizes[15] = B * T * Vp; // probs
 }
 
 // Memory allocation helpers
@@ -500,10 +481,10 @@ static float *malloc_and_point_activations(struct activation_tensors *acts, size
         return NULL;
 
     float **ptrs[] = {
-        &acts->encoded, &acts->ln1, &acts->ln1_mean, &acts->ln1_rstd, &acts->qkv, &acts->atty,
-        &acts->preatt, &acts->att, &acts->attproj, &acts->residual2, &acts->ln2, &acts->ln2_mean,
-        &acts->ln2_rstd, &acts->fch, &acts->fch_gelu, &acts->fcproj, &acts->residual3, &acts->lnf,
-        &acts->lnf_mean, &acts->lnf_rstd, &acts->logits, &acts->probs, &acts->losses
+        &acts->encoded, &acts->ln1, &acts->qkv, &acts->atty,
+        &acts->preatt, &acts->att, &acts->attproj, &acts->residual2,
+        &acts->ln2, &acts->fch, &acts->fch_gelu, &acts->fcproj,
+        &acts->residual3, &acts->lnf, &acts->logits, &acts->probs
     };
     float *acts_memory_iterator = acts_memory;
     for (size_t i = 0; i < NUM_ACTIVATION_TENSORS; i++) {
@@ -570,13 +551,13 @@ int gpt2_build_from_firmware(struct gpt2_model *model, const struct firmware *fw
     model->inputs = NULL;
     model->batch_size = 0;
     model->seq_len = 0;
-    model->mean_loss = -1.0f;
     model->fw_tokenizer = NULL; // Will be set by the caller
 
     return 0;
 }
 
 void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t B, size_t T) {
+    pr_info("[GPT-2] Beginning forward pass\n");
     if (!model->params_memory) {
         pr_err("Model not initialized properly\n");
         return;
@@ -592,10 +573,6 @@ void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t B,
     for(int i = 0; i < B * T; i++) {
         if (!(0 <= inputs[i] && inputs[i] < V)) {
             pr_err("Invalid input token: %d\n", inputs[i]);
-            return;
-        }
-        if (targets && !(0 <= targets[i] && targets[i] < V)) {
-            pr_err("Invalid target token: %d\n", targets[i]);
             return;
         }
     }
@@ -668,48 +645,69 @@ void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t B,
         float *l_residual3 = acts.residual3 + l * B * T * C;
 
         kernel_fpu_end();
-        cond_resched();
-        kernel_fpu_begin();
 
+        cond_resched();
+        pr_info("[GPT-2] layer %d: layernorm 1\n", l);
+        kernel_fpu_begin();
         layernorm_forward(l_ln1, residual, l_ln1w, l_ln1b, B, T, C);
         kernel_fpu_end();
+
         cond_resched();
+        pr_info("[GPT-2] layer %d: matmul 1\n", l);
         kernel_fpu_begin();
         matmul_forward(l_qkv, l_ln1, l_qkvw, l_qkvb, B, T, C, 3*C);
         kernel_fpu_end();
+
         cond_resched();
+        pr_info("[GPT-2] layer %d: attention\n", l);
         kernel_fpu_begin();
         attention_forward(l_atty, l_preatt, l_att, l_qkv, B, T, C, NH);
         kernel_fpu_end();
+
         cond_resched();
+        pr_info("[GPT-2] layer %d: matmul 2\n", l);
         kernel_fpu_begin();
         matmul_forward(l_attproj, l_atty, l_attprojw, l_attprojb, B, T, C, C);
         kernel_fpu_end();
+
         cond_resched();
+        pr_info("[GPT-2] layer %d: residual 1\n", l);
         kernel_fpu_begin();
         residual_forward(l_residual2, residual, l_attproj, B*T*C);
         kernel_fpu_end();
+
         cond_resched();
+        pr_info("[GPT-2] layer %d: layernorm 2\n", l);
         kernel_fpu_begin();
         layernorm_forward(l_ln2, l_residual2, l_ln2w, l_ln2b, B, T, C);
         kernel_fpu_end();
+
         cond_resched();
+        pr_info("[GPT-2] layer %d: matmul 3\n", l);
         kernel_fpu_begin();
         matmul_forward(l_fch, l_ln2, l_fcw, l_fcb, B, T, C, 4*C);
         kernel_fpu_end();
+
         cond_resched();
+        pr_info("[GPT-2] layer %d: gelu\n", l);
         kernel_fpu_begin();
         gelu_forward(l_fch_gelu, l_fch, B*T*4*C);
         kernel_fpu_end();
+
         cond_resched();
+        pr_info("[GPT-2] layer %d: matmul 4\n", l);
         kernel_fpu_begin();
         matmul_forward(l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, B, T, 4*C, C);
         kernel_fpu_end();
+
         cond_resched();
+        pr_info("[GPT-2] layer %d: residual 2\n", l);
         kernel_fpu_begin();
         residual_forward(l_residual3, l_residual2, l_fcproj, B*T*C);
         kernel_fpu_end();
+
         cond_resched();
+        pr_info("[GPT-2] layer %d: layernorm 3\n", l);
         kernel_fpu_begin();
     }
 
@@ -717,18 +715,8 @@ void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t B,
     layernorm_forward(acts.lnf, residual, params.lnfw, params.lnfb, B, T, C);
     matmul_forward(acts.logits, acts.lnf, params.wte, NULL, B, T, C, Vp);
     softmax_forward(acts.probs, acts.logits, B, T, V, Vp);
-
-    if (targets) {
-        crossentropy_forward(model->acts.losses, model->acts.probs, targets, B, T, Vp);
-        float mean_loss = 0.0f;
-        for (int i = 0; i < B*T; i++) {
-            mean_loss += model->acts.losses[i];
-        }
-        mean_loss /= B*T;
-        model->mean_loss = mean_loss;
-    } else {
-        model->mean_loss = -1.0f;
-    }
+    
+    kernel_fpu_end();
 }
 
 void gpt2_free(struct gpt2_model *model) {
@@ -836,11 +824,6 @@ int gpt2_generate_next_token(struct gpt2_model *model, const char *prompt, char 
     }
 
     size_t token_len = strlen(token_str);
-    if (token_len >= MAX_OUTPUT_SIZE) {
-        vfree(gen_tokens);
-        tokenizer_free(&tokenizer);
-        return -EINVAL;
-    }
     memcpy(output, token_str, token_len);
     output[token_len] = '\0';
     
