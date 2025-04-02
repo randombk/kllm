@@ -14,6 +14,11 @@ OUTPUT_FILE = -o $@
 # PHONY means these targets will always be executed
 .PHONY: all infer_gpt2 clean
 
+obj-m += kllm.o
+
+kllm:
+	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+
 # Add targets
 TARGETS = infer_gpt2
 
@@ -25,3 +30,4 @@ infer_gpt2: infer_gpt2.c
 clean:
 	$(REMOVE_FILES) $(TARGETS)
 	$(REMOVE_BUILD_OBJECT_FILES)
+	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean

@@ -10,6 +10,19 @@ infer_gpt2
 *.obj
 *.exe
 *.o
+*.img
+*.iso
+
+# kernel module outputs
+*.ko
+*.cmd
+*.mod
+*.mod.c
+*.order
+*.symvers
 
 # log files
 *.log
+
+# QEMU
+.virtfs_metadata
