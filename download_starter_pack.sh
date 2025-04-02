@@ -6,40 +6,21 @@ SCRIPT_DIR=$(dirname "$(realpath "$0")")
 # Base URL
 BASE_URL="https://huggingface.co/datasets/karpathy/llmc-starter-pack/resolve/main/"
 
-# Directory paths based on script location
-SAVE_DIR_PARENT="$SCRIPT_DIR/.."
-SAVE_DIR_TINY="$SCRIPT_DIR/data/tinyshakespeare"
-SAVE_DIR_HELLA="$SCRIPT_DIR/data/hellaswag"
-
-# Create the directories if they don't exist
-mkdir -p "$SAVE_DIR_TINY"
-mkdir -p "$SAVE_DIR_HELLA"
+# Directory path based on script location
+SAVE_DIR_PARENT="$SCRIPT_DIR"
 
 # Files to download
 FILES=(
     "gpt2_124M.bin"
     "gpt2_124M_bf16.bin"
-    "gpt2_124M_debug_state.bin"
     "gpt2_tokenizer.bin"
-    "tiny_shakespeare_train.bin"
-    "tiny_shakespeare_val.bin"
-    "hellaswag_val.bin"
 )
 
 # Function to download files to the appropriate directory
 download_file() {
     local FILE_NAME=$1
     local FILE_URL="${BASE_URL}${FILE_NAME}?download=true"
-    local FILE_PATH
-
-    # Determine the save directory based on the file name
-    if [[ "$FILE_NAME" == tiny_shakespeare* ]]; then
-        FILE_PATH="${SAVE_DIR_TINY}/${FILE_NAME}"
-    elif [[ "$FILE_NAME" == hellaswag* ]]; then
-        FILE_PATH="${SAVE_DIR_HELLA}/${FILE_NAME}"
-    else
-        FILE_PATH="${SAVE_DIR_PARENT}/${FILE_NAME}"
-    fi
+    local FILE_PATH="${SAVE_DIR_PARENT}/${FILE_NAME}"
 
     # Download the file
     curl -s -L -o "$FILE_PATH" "$FILE_URL"
