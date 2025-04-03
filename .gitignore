@@ -7,11 +7,13 @@
 
 # binaries
 infer_gpt2
+float-test
 *.obj
 *.exe
 *.o
 *.img
 *.iso
+*.out
 
 # kernel module outputs
 *.ko

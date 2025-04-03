@@ -1,195 +1,64 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/slab.h>
 #include <linux/firmware.h>
-#include <linux/math.h>
-#include <linux/math64.h>
 #include <linux/vmalloc.h>
 #include <asm/fpu/api.h>
+#include <linux/random.h>
 #include "kllm_gpt2.h"
 
-/* 
- * Implementation of square root for float values 
- * using integer square root and bit manipulation
- */
-void kernel_sqrt(float x, float *result)
-{
-    /* Handle special cases */
+static void kernel_sqrt(float x, float *result) {
+    // Handle special cases first
     if (x < 0.0f) {
-        *result = 0;
-        return;  /* Not a number does not exist in kernel */
-    }
-    if (x == 0.0f || x == 1.0f) {
-        *result = x;
+        *result = 0.0f; // NaN does not work here
         return;
     }
     
-    /* Extract the binary representation of the float */
-    u32 i = *(u32*)&x;
-    
-    /* Handle special case for infinity */
-    if (i == 0x7f800000) {
-        *result = x;
-        return;
-    }
-    
-    /* Extract the exponent and mantissa */
-    int exp = ((i >> 23) & 0xff) - 127;
-    u32 mantissa = i & 0x7fffff;
-    
-    /* Convert float to a fixed-point integer representation */
-    u32 int_val = (mantissa | 0x800000) << 8;
-    
-    /* Calculate integer square root using kernel's int_sqrt function */
-    u32 sqrt_int = int_sqrt(int_val) << 8;
-    
-    /* Adjust the exponent for the square root */
-    int new_exp = (exp >> 1) + 127;
-    if (exp & 1) /* Odd exponent */
-        sqrt_int = (sqrt_int * 0xb504) >> 16; /* Approximate sqrt(2) = 1.414 */
-    
-    /* Combine the parts back into a float */
-    u32 result_i = (new_exp << 23) | ((sqrt_int >> 8) & 0x7fffff);
-    
-    /* Convert back to float */
-    *result = *(float*)&result_i;
+    __asm__ __volatile__ (
+        "flds %1\n\t"      // Load float x onto FPU stack
+        "fsqrt\n\t"        // Compute square root
+        "fstps %0\n\t"     // Store the result to *result
+        : "=m" (*result)   // output
+        : "m" (x)          // input
+        : "st"             // clobbered FPU register
+    );
 }
 
-/*
- * Implementation of exponential function for float values
- * using integer math and bit manipulation
- */
-void kernel_exp(float x, float *result)
-{
-    /* Handle special cases */
-    if (x == 0.0f) {
-        *result = 1.0f;
+static void kernel_exp(float x, float *result) {
+    // Handle special cases first
+    if (x > 88.0f) {
+        // HACK: Some very high value.
+        *result = 999999.0f;
+        // *result = 0x7F800000; // INFINITY
         return;
     }
-    if (x == 1.0f) {
-        *result = 2.71828182f; /* e */
-        return;
-    }
-    if (x >= 88.0f) {        /* Beyond this, we'd overflow a float */
-        *result = 0x7F800000; /* INFINITY */
-        return;
-    }
-    if (x <= -88.0f) {
+    if (x < -88.0f) {
         *result = 0.0f;
         return;
     }
 
-    /* Constants for Taylor series approximation */
-    const float ln2 = 0.693147181f;  /* Natural log of 2 */
-    
-    /* Break down input into integer and fractional parts */
-    int int_part = (int)x;
-    float frac_part = x - int_part;
-    
-    /* 
-     * Calculate 2^int_part by directly manipulating the IEEE 754 exponent.
-     * This is a much faster approach than repeated multiplication.
-     */
-    int exp_bias = 127;  /* IEEE 754 single-precision exponent bias */
-    u32 int_pow_bits = (u32)(int_part + exp_bias) << 23;
-    float int_pow = *(float*)&int_pow_bits;
-    
-    /* 
-     * Calculate e^frac_part using Taylor series approximation:
-     * e^x ≈ 1 + x + x²/2! + x³/3! + x⁴/4! + ...
-     * We'll use first 8 terms for decent accuracy
-     */
-    float res = 1.0f;
-    float term = 1.0f;
-    float frac_pow = frac_part;
-    
-    for (int i = 1; i <= 8; i++) {
-        term *= frac_pow / i;
-        res += term;
+    __asm__ __volatile__ (
+        "flds %1\n\t"          // ST(0) = x
+        "fldl2e\n\t"           // ST(0) = log2(e), ST(1) = x
+        "fmulp\n\t"            // ST(0) = x * log2(e)
         
-        /* If term is very small, we can stop */
-        if (term < 0.0000001f)
-            break;
-    }
-    
-    /* Combine integer and fractional ress using e^(a+b) = e^a * e^b */
-    res *= int_pow;
-    
-    *result = res;
+        "fld %%st(0)\n\t"      // ST(0) = x * log2(e), ST(1) = x * log2(e)
+        "frndint\n\t"          // ST(0) = n (integer part), ST(1) = x*log2(e)
+        "fxch\n\t"             // ST(0) = x*log2(e), ST(1) = n
+        "fsub %%st(1), %%st\n\t"  // ST(0) = f = x*log2(e) - n, ST(1) = n
+        "f2xm1\n\t"            // ST(0) = 2^f - 1, ST(1) = n
+        "fld1\n\t"             // ST(0) = 1, ST(1) = 2^f - 1, ST(2) = n
+        "faddp\n\t"            // ST(0) = 2^f, ST(1) = n
+        "fscale\n\t"           // ST(0) = 2^f * 2^n = e^x
+        "fstp %%st(1)\n\t"     // pop n from stack, leaving just e^x
+        "fstps %0\n\t"         // Store result
+        : "=m" (*result)
+        : "m" (x)
+        : "st", "st(1)", "st(2)", "st(3)", "st(4)", "st(5)", "st(6)", "st(7)", 
+          "eax", "ecx", "edx", "memory"
+    );
 }
 
-/*
- * Implementation of natural logarithm for float values
- * using bit manipulation and series approximation
- */
-void kernel_log(float x, float *result)
-{
-    /* Handle special cases */
-    if (x <= 0.0f) {
-        *result = 0;  /* Not a number for negative inputs */
-        return;
-    }
-    if (x == 1.0f) {
-        *result = 0.0f;
-        return;
-    }
-    if (x == 2.71828182f) { /* e */
-        *result = 1.0f;
-        return;
-    }
-    
-    /* Extract the IEEE 754 components */
-    u32 i = *(u32*)&x;
-    int exp_biased = (i >> 23) & 0xff;
-    int exponent = exp_biased - 127;  /* Unbiased exponent */
-    u32 mantissa = i & 0x7fffff;
-    
-    /* 
-     * Calculate log(x) = log(2^exponent * (1.mantissa)) 
-     *                  = exponent * log(2) + log(1.mantissa)
-     */
-    float log2 = 0.693147181f;  /* ln(2) */
-    
-    /* Normalize x to range [1, 2) */
-    float normalized = 1.0f + ((float)mantissa / 0x800000);
-    
-    /* 
-     * Calculate log(normalized) using polynomial approximation.
-     * We'll use a minimax polynomial approximation for [1, 2) range.
-     * ln(y) ≈ 2 * sum_{k=0}^∞ ((y-1)/(y+1))^(2k+1) / (2k+1)
-     */
-    float y_minus_1 = normalized - 1.0f;
-    float y_plus_1 = normalized + 1.0f;
-    float z = y_minus_1 / y_plus_1;
-    float z_squared = z * z;
-    float z_power = z;
-    float log_sum = z;  /* First term */
-    
-    /* Add more terms of the series */
-    for (int k = 1; k < 10; k++) {  /* 10 terms for good precision */
-        z_power *= z_squared;
-        float term = z_power / (2 * k + 1);
-        log_sum += term;
-        
-        /* If term is very small, we can stop */
-        if (term < 0.0000001f)
-            break;
-    }
-    
-    /* Multiply by 2 and add the exponent contribution */
-    float res = 2.0f * log_sum + exponent * log2;
-    
-    *result = res;
-}
-
-
-/*
- * Implementation of hyperbolic tangent for float values
- * tanh(x) = (e^x - e^-x) / (e^x + e^-x)
- */
-void kernel_tanh(float x, float *result)
-{
-    /* Handle special cases */
+static void kernel_tanh(float x, float *result) {
     if (x == 0.0f) {
         *result = 0.0f;
         return;
@@ -204,7 +73,7 @@ void kernel_tanh(float x, float *result)
         *result = -1.0f;
         return;
     }
-    
+
     /* 
      * Calculate tanh using the standard formula:
      * tanh(x) = (e^x - e^-x) / (e^x + e^-x)
@@ -235,11 +104,20 @@ static float *malloc_and_point_activations(struct activation_tensors *acts, size
 
 // Layer forward pass implementations
 static void encoder_forward(float *out, int *inp, float *wte, float *wpe, int T, int C) {
+    // out is (T,C). At each position (t), a C-dimensional vector summarizing token & position
+    // inp is (T) of integers, holding the token ids at each (t) position
+    // wte is (V,C) of token embeddings, short for "weight token embeddings"
+    // wpe is (maxT,C) of position embeddings, short for "weight positional embedding"
     for (int t = 0; t < T; t++) {
+        // seek to the output position in out[t,:]
         float *out_t = out + t * C;
+        // get the index of the token at inp[t]
         int ix = inp[t];
+        // seek to the position in wte corresponding to the token
         float *wte_ix = wte + ix * C;
+        // seek to the position in wpe corresponding to the position
         float *wpe_t = wpe + t * C;
+        // add the two vectors and store the result in out[t,:]
         for (int i = 0; i < C; i++) {
             out_t[i] = wte_ix[i] + wpe_t[i];
         }
@@ -247,41 +125,62 @@ static void encoder_forward(float *out, int *inp, float *wte, float *wpe, int T,
 }
 
 static void layernorm_forward(float *out, float *inp, float *weight, float *bias, int T, int C) {
+    // reference: https://pytorch.org/docs/stable/generated/torch.nn.LayerNorm.html
+    // both inp and out are (T,C) of the activations
+    // mean and rstd are (T) buffers, to be used later in backward pass
+    // at each position (t) of the input, the C-dimensional vector
+    // of activations gets normalized, then scaled and shifted
     float eps = 1e-5f;
     for (int t = 0; t < T; t++) {
+        // seek to the input position inp[t,:]
         float *x = inp + t * C;
+        // compute the mean of the input vector
         float m = 0.0f;
         for (int i = 0; i < C; i++) {
             m += x[i];
         }
         m = m/C;
+        // calculate the variance (without any bias correction)
         float v = 0.0f;
         for (int i = 0; i < C; i++) {
             float xshift = x[i] - m;
             v += xshift * xshift;
         }
         v = v/C;
+
+        // calculate the rstd (reciprocal standard deviation)
         float ret;
         kernel_sqrt(v + eps, &ret);
         float s = 1.0f / ret;
+
+        // seek to the output position in out[t,:]
         float *out_t = out + t * C;
         for (int i = 0; i < C; i++) {
-            float n = (s * (x[i] - m));
-            float o = n * weight[i] + bias[i];
-            out_t[i] = o;
+            float n = (s * (x[i] - m)); // normalize
+            float o = n * weight[i] + bias[i]; // scale and shift
+            out_t[i] = o; // write
         }
     }
 }
 
 static void matmul_forward(float *out, const float *inp, const float *weight, const float *bias,
                           int T, int C, int OC) {
+    // the most naive implementation of matrix multiplication
+    // this serves as an algorithmic reference
     for (int t = 0; t < T; t++) {
+        // If OC is very large (>10000), break the loop into smaller chunks and yield to other tasks
+        if (OC > 10000) {
+            if (t % 256 == 0) {
+                kernel_fpu_end();
+                cond_resched();
+                kernel_fpu_begin();
+            }
+        }
+
         for (int o = 0; o < OC; o++) {
             float val = (bias != NULL) ? bias[o] : 0.0f;
             for (int i = 0; i < C; i++) {
-                float weight_val = weight[o*C + i];
-                float inp_val = inp[t * C + i];
-                val += inp_val * weight_val;
+                val += inp[t * C + i] * weight[o*C + i];
             }
             out[t * OC + o] = val;
         }
@@ -290,8 +189,16 @@ static void matmul_forward(float *out, const float *inp, const float *weight, co
 
 static void attention_forward(float *out, float *preatt, float *att, float *inp,
                             int T, int C, int NH) {
+    // input is (T, 3C) holding the query, key, value (Q, K, V) vectors
+    // preatt, att are (NH, T, T). NH = number of heads, T = sequence length
+    // that holds the pre-attention and post-attention scores (used in backward)
+    // output is (T, C)
+    // attention is the only layer that mixes information across time
+    // every other operation is applied at every (b,t) position independently
+    // (and of course, no layer mixes information across batch)
     int C3 = C*3;
-    int hs = C / NH;
+    int hs = C / NH; // head size
+
     float ret;
     kernel_sqrt(hs, &ret);
     float scale = 1.0f / ret;
@@ -299,41 +206,52 @@ static void attention_forward(float *out, float *preatt, float *att, float *inp,
     for (int t = 0; t < T; t++) {
         for (int h = 0; h < NH; h++) {
             float *query_t = inp + t * C3 + h * hs;
+            float* preatt_bth = preatt + h*T*T + t*T;
             float *att_th = att + h*T*T + t*T;
 
-            float maxval = -10000.0f;
+            // pass 1: calculate query dot key and maxval
+            float maxval = -10000.0f; // TODO something better
             for (int t2 = 0; t2 <= t; t2++) {
                 float *key_t2 = inp + t2 * C3 + h * hs + C;
+
+                // (query_t) dot (key_t2)
                 float val = 0.0f;
                 for (int i = 0; i < hs; i++) {
                     val += query_t[i] * key_t2[i];
                 }
                 val *= scale;
                 if (val > maxval) maxval = val;
-                att_th[t2] = val;
+
+                preatt_bth[t2] = val;
             }
 
+            // pass 2: calculate the exp and keep track of sum
+            // maxval is being calculated and subtracted only for numerical stability
             float expsum = 0.0f;
             for (int t2 = 0; t2 <= t; t2++) {
                 float expv;
-                kernel_exp(att_th[t2] - maxval, &expv);
+                kernel_exp(preatt_bth[t2] - maxval, &expv);
                 expsum += expv;
                 att_th[t2] = expv;
             }
-            float expsum_inv = 1.0f / expsum;
+            float expsum_inv = expsum == 0.0f ? 0.0f : 1.0f / expsum;
 
+            // pass 3: normalize to get the softmax
             for (int t2 = 0; t2 < T; t2++) {
                 if (t2 <= t) {
                     att_th[t2] *= expsum_inv;
                 } else {
+                    // causal attention mask. not strictly necessary to set to zero here
+                    // only doing this explicitly for debugging and checking to PyTorch
                     att_th[t2] = 0.0f;
                 }
             }
 
+            // pass 4: accumulate weighted values into the output of attention
             float *out_th = out + t * C + h * hs;
             for (int i = 0; i < hs; i++) { out_th[i] = 0.0f; }
             for (int t2 = 0; t2 <= t; t2++) {
-                float *value_t2 = inp + t2 * C3 + h * hs + C*2;
+                float *value_t2 = inp + t2 * C3 + h * hs + C*2; // +C*2 because it's value
                 float att_tht2 = att_th[t2];
                 for (int i = 0; i < hs; i++) {
                     out_th[i] += att_tht2 * value_t2[i];
@@ -345,6 +263,7 @@ static void attention_forward(float *out, float *preatt, float *att, float *inp,
 
 #define GELU_SCALING_FACTOR 0.7978845608028654f
 static void gelu_forward(float *out, float *inp, int N) {
+    // (approximate) GeLU elementwise non-linearity in the MLP block of Transformer
     for (int i = 0; i < N; i++) {
         float x = inp[i];
         float cube = 0.044715f * x * x * x;
@@ -360,32 +279,43 @@ static void residual_forward(float *out, float *inp1, float *inp2, int N) {
     }
 }
 
-static void softmax_forward(float *probs, float *logits, int B, int T, int V, int Vp) {
-    for (int b = 0; b < B; b++) {
-        for (int t = 0; t < T; t++) {
-            float *logits_bt = logits + b * T * Vp + t * Vp;
-            float *probs_bt = probs + b * T * Vp + t * Vp;
+static void softmax_forward(float *probs, float *logits, int T, int V, int Vp) {
+    // output: probs are (B,T,Vp) of the probabilities (sums to 1.0 in each b,t position)
+    // input: logits is (B,T,Vp) of the unnormalized log probabilities
+    // Vp is the padded vocab size (for efficiency), V is the "real" vocab size
+    // example: Vp is 50304 and V is 50257
 
-            float maxval = -10000.0f;
-            for (int i = 0; i < V; i++) {
-                if (logits_bt[i] > maxval) {
-                    maxval = logits_bt[i];
-                }
+    pr_info("[GPT-2] softmax_forward T: %d, V: %d, Vp: %d\n", T, V, Vp);
+    for (int t = 0; t < T; t++) {
+        // probs <- softmax(logits)
+        float *logits_t = logits + t * Vp;
+        float *probs_t = probs + t * Vp;
+
+        // maxval is only calculated and subtracted for numerical stability
+        float maxval = -10000.0f;
+        for (int i = 0; i < V; i++) {
+            if (logits_t[i] > maxval) {
+                maxval = logits_t[i];
             }
-            float sum = 0.0f;
-            for (int i = 0; i < V; i++) {
-                float res;
-                kernel_exp(logits_bt[i] - maxval, &res);
-                probs_bt[i] = res;
-                sum += probs_bt[i];
-            }
-            float sum_inv = 1.0f / sum;
-            for (int i = 0; i < V; i++) {
-                probs_bt[i] *= sum_inv;
-            }
-            for (int i = V; i < Vp; i++) {
-                probs_bt[i] = 0.0f;
-            }
+        }
+        float sum = 0.0f;
+        for (int i = 0; i < V; i++) {
+            float res;
+            kernel_exp(logits_t[i] - maxval, &res);
+            probs_t[i] = res;
+            sum += probs_t[i];
+        }
+        if (sum < 0.1f) {
+            pr_err("[GPT-2] Very low SUM: %ld\n", (long)(sum*100.0f));
+        }
+        // note we only loop to V, leaving the padded dimensions
+        for (int i = 0; i < V; i++) {
+            probs_t[i] /= sum;
+        }
+        // for extra super safety we may wish to include this too,
+        // forcing the probabilities here to be zero, but it shouldn't matter
+        for (int i = V; i < Vp; i++) {
+            probs_t[i] = 0.0f;
         }
     }
 }
@@ -569,6 +499,8 @@ void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t T)
     size_t NH = model->config.num_heads;
     size_t C = model->config.channels;
 
+    pr_info("[GPT-2] V: %zu, Vp: %zu, L: %zu, NH: %zu, C: %zu\n", V, Vp, L, NH, C);
+
     // Validate inputs
     for(int i = 0; i < T; i++) {
         if (!(0 <= inputs[i] && inputs[i] < V)) {
@@ -613,10 +545,11 @@ void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t T)
     kernel_fpu_begin();
     float *residual;
 
-    encoder_forward(acts.encoded, inputs, params.wte, params.wpe, T, C);
+    encoder_forward(acts.encoded, inputs, params.wte, params.wpe, T, C); // encoding goes into residual[0]
     for (int l = 0; l < L; l++) {
         residual = l == 0 ? acts.encoded : acts.residual3 + (l-1) * T * C;
 
+        // get the pointers of the weights for this layer
         float *l_ln1w = params.ln1w + l * C;
         float *l_ln1b = params.ln1b + l * C;
         float *l_qkvw = params.qkvw + l * 3*C * C;
@@ -630,6 +563,7 @@ void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t T)
         float *l_fcprojw = params.fcprojw + l * C * 4*C;
         float *l_fcprojb = params.fcprojb + l * C;
 
+        // get the pointers of the activations for this layer
         float *l_ln1 = acts.ln1 + l * T * C;
         float *l_qkv = acts.qkv + l * T * 3*C;
         float *l_atty = acts.atty + l * T * C;
@@ -645,6 +579,7 @@ void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t T)
 
         kernel_fpu_end();
 
+        // now do the forward pass
         cond_resched();
         pr_info("[GPT-2] layer %d: layernorm 1\n", l+1);
         kernel_fpu_begin();
@@ -710,7 +645,7 @@ void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t T)
         kernel_fpu_begin();
     }
 
-    residual = acts.residual3 + (L-1) * T * C;
+    residual = acts.residual3 + (L-1) * T * C; // last residual is in residual3
     kernel_fpu_end();
 
     cond_resched();
@@ -728,7 +663,7 @@ void gpt2_forward(struct gpt2_model *model, int *inputs, int *targets, size_t T)
     cond_resched();
     pr_info("[GPT-2] softmax_forward\n");
     kernel_fpu_begin();
-    softmax_forward(acts.probs, acts.logits, 1, T, V, Vp);
+    softmax_forward(acts.probs, acts.logits, T, V, Vp);
     kernel_fpu_end();
 }
 
@@ -744,18 +679,15 @@ void gpt2_free(struct gpt2_model *model) {
 }
 
 // Random number generation for sampling
-static unsigned int random_u32(uint64_t *state) {
-    *state ^= *state >> 12;
-    *state ^= *state << 25;
-    *state ^= *state >> 27;
-    return (*state * 0x2545F4914F6CDD1Dull) >> 32;
-}
-
-static void random_f32(uint64_t *state, float *result) {
-    *result = (random_u32(state) >> 8) / 16777216.0f;
+static void random_f32(float *result) {
+    unsigned int rand_val;
+    get_random_bytes(&rand_val, sizeof(rand_val));
+    *result = (float)rand_val / (float)(0xFFFFFFFF - 1);
 }
 
 static int sample_mult(float *probabilities, int n, float coin) {
+    // sample index from probabilities (they must sum to 1!)
+    // coin is a random number in [0, 1), usually from random_f32()
     float cdf = 0.0f;
     for (int i = 0; i < n; i++) {
         cdf += probabilities[i];
@@ -763,6 +695,11 @@ static int sample_mult(float *probabilities, int n, float coin) {
             return i;
         }
     }
+
+    if (cdf > 1.1f || cdf < 0.9f) {
+        pr_err("[GPT-2] BAD CDF: %ld\n", (long)(cdf*100.0f));
+    }
+
     return n - 1;
 }
 
@@ -787,8 +724,6 @@ int gpt2_generate_next_token(struct gpt2_model *model, const char *prompt, char 
     }
     memset(gen_tokens, 0, T * sizeof(int));
     
-    uint64_t rng_state = 1337; // fixed seed for reproducibility
-
     // Encode the prompt
     size_t num_prompt_tokens;
     tokenizer_encode(&model->tokenizer, prompt, gen_tokens, &num_prompt_tokens);
@@ -797,19 +732,32 @@ int gpt2_generate_next_token(struct gpt2_model *model, const char *prompt, char 
         vfree(gen_tokens);
         return -EINVAL;
     }
-
+    for (int i = 0; i < num_prompt_tokens; i++) {
+        pr_info("[GPT-2] Prompt token %d: %d\n", i, gen_tokens[i]);
+    }
+    
     // Run the model forward pass
     gpt2_forward(model, gen_tokens, NULL, T);
-    
+
     cond_resched();
     kernel_fpu_begin();
+    
+    float coin = 0.0f;
+    random_f32(&coin);
+    pr_info("[GPT-2] Coin: %ld\n", (long)(coin*100.0f));
+
     // Get the next token probabilities
     float *probs = model->acts.probs + (num_prompt_tokens-1) * model->config.padded_vocab_size;
-    float coin;
-    random_f32(&rng_state, &coin);
+    for (int i = 0; i < model->config.vocab_size; i++) {
+        if (probs[i] > 0.1f) {
+            pr_info("[GPT-2] Probability for token %d: %ld\n", i, (long)(probs[i]*100.0f));
+        }
+    }
     int next_token = sample_mult(probs, model->config.vocab_size, coin);
     kernel_fpu_end();
     cond_resched();
+
+    pr_info("[GPT-2] Generated token ID: %d\n", next_token);
     
     // Stop if we hit the end token
     if (next_token == model->tokenizer.eot_token) {

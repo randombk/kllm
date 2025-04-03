@@ -38,22 +38,22 @@ struct parameter_tensors {
 // Activation tensors for the model
 #define NUM_ACTIVATION_TENSORS 16
 struct activation_tensors {
-    float *encoded;     // (B, T, C)
-    float *ln1;         // (L, B, T, C)
-    float *qkv;         // (L, B, T, 3*C)
-    float *atty;        // (L, B, T, C)
-    float *preatt;      // (L, B, NH, T, T)
-    float *att;         // (L, B, NH, T, T)
-    float *attproj;     // (L, B, T, C)
-    float *residual2;   // (L, B, T, C)
-    float *ln2;         // (L, B, T, C)
-    float *fch;         // (L, B, T, 4*C)
-    float *fch_gelu;    // (L, B, T, 4*C)
-    float *fcproj;      // (L, B, T, C)
-    float *residual3;   // (L, B, T, C)
-    float *lnf;         // (B, T, C)
-    float *logits;      // (B, T, V)
-    float *probs;       // (B, T, V)
+    float *encoded;     // (T, C)
+    float *ln1;         // (L, T, C)
+    float *qkv;         // (L, T, 3*C)
+    float *atty;        // (L, T, C)
+    float *preatt;      // (L, NH, T, T)
+    float *att;         // (L, NH, T, T)
+    float *attproj;     // (L, T, C)
+    float *residual2;   // (L, T, C)
+    float *ln2;         // (L, T, C)
+    float *fch;         // (L, T, 4*C)
+    float *fch_gelu;    // (L, T, 4*C)
+    float *fcproj;      // (L, T, C)
+    float *residual3;   // (L, T, C)
+    float *lnf;         // (T, C)
+    float *logits;      // (T, V)
+    float *probs;       // (T, V)
 };
 
 // Tokenizer structure

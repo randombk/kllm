@@ -11,6 +11,7 @@ This repo ports a heavily-stripped down version of [llm.c](https://github.com/ka
 ## Building & Installing
 
 ```bash
+# Build the module. Make sure to have the right kernel headers installed.
 make
 
 # Download the GPT-2 checkpoints
@@ -27,7 +28,8 @@ sudo insmod kllm.ko
 ## Usage
 
 ```bash
-echo "Hello, world!" > /dev/llm0
+# Exclude newline, otherwise the LLM with generate a few extra newlines before writing actual text
+echo -n "Hello, world!" > /dev/llm0
 
 # Responses will appear in `dmesg` for now. It should also be readable from `/dev/llm0`, but this is unstable.
 ```

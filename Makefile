@@ -1,8 +1,5 @@
 CC ?= clang
 CFLAGS = -O3 -Wno-unused-result -Wno-ignored-pragmas -Wno-unknown-attributes
-LDFLAGS =
-LDLIBS = -lm
-INCLUDES =
 
 CC_FLAGS_FPU := -mhard-float
 CFLAGS_kllm_gpt2.o += $(CC_FLAGS_FPU)
